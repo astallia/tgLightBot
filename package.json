@@ -1,0 +1,14 @@
+{
+  "name": "dtek-svet-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram-бот: график отключений ДТЭК по адресу, подсчёт часов со светом и без, предупреждение до отключения",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --env-file=.env src/index.js",
+    "test": "node --test"
+  }
+}
