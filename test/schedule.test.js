@@ -111,16 +111,16 @@ test('only changes in the group that matter count', () => {
   const base = { data: { [TODAY]: { G: allYes(), H: allYes() } } };
   const seen = snapshot(base, 'G');
   const otherGroup = { data: { [TODAY]: { G: allYes(), H: allYes({ 5: 'no' }) } } };
-  assert.deepEqual(diffSnapshots(seen, snapshot(otherGroup, 'G'), noon), { changed: false, added: false });
+  assert.deepEqual(diffSnapshots(seen, snapshot(otherGroup, 'G'), noon), { changed: false, added: false, days: [] });
   const ownGroup = { data: { [TODAY]: { G: allYes({ 5: 'no' }) } } };
-  assert.deepEqual(diffSnapshots(seen, snapshot(ownGroup, 'G'), noon), { changed: true, added: false });
+  assert.deepEqual(diffSnapshots(seen, snapshot(ownGroup, 'G'), noon), { changed: true, added: false, days: [TODAY] });
   const withTomorrow = { data: { [TODAY]: { G: allYes() }, [TOMORROW]: { G: allYes() } } };
-  assert.deepEqual(diffSnapshots(seen, snapshot(withTomorrow, 'G'), noon), { changed: false, added: true });
+  assert.deepEqual(diffSnapshots(seen, snapshot(withTomorrow, 'G'), noon), { changed: false, added: true, days: [TOMORROW] });
 });
 
 test('midnight rollover is not a change, a withdrawn current schedule is', () => {
   const seen = snapshot({ data: { [TODAY]: { G: allYes() } } }, 'G');
   const nextDay = { data: { [TOMORROW]: { G: allYes() } } };
-  assert.deepEqual(diffSnapshots({ ...seen, [TOMORROW]: JSON.stringify(allYes()) }, snapshot(nextDay, 'G'), at(0, 5, 7)), { changed: false, added: false });
-  assert.deepEqual(diffSnapshots(seen, {}, at(12)), { changed: true, added: false });
+  assert.deepEqual(diffSnapshots({ ...seen, [TOMORROW]: JSON.stringify(allYes()) }, snapshot(nextDay, 'G'), at(0, 5, 7)), { changed: false, added: false, days: [] });
+  assert.deepEqual(diffSnapshots(seen, {}, at(12)), { changed: true, added: false, days: [TODAY] });
 });

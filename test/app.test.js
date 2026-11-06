@@ -66,14 +66,24 @@ function setup({ fact, houses } = {}) {
       if (telegram.failing) throw new Error('telegram down');
       sent.push({ chatId, text, extra });
     },
+    sendPhoto: async (chatId, photo, caption, extra) => {
+      if (telegram.failing) throw new Error('telegram down');
+      sent.push({ chatId, text: caption, extra, photo });
+    },
     answerCallbackQuery: async () => {
       if (telegram.answerFailing) throw new Error('query is too old');
     },
   };
+  const images = { failing: false, drawn: [] };
+  const renderImage = (schedule) => {
+    if (images.failing) throw new Error('no font');
+    images.drawn.push(schedule);
+    return Buffer.from('png');
+  };
   const path = join(tempDir, `state-${fileCounter++}.json`);
   const store = createStore(path);
   const make = (activeStore) => createApp({
-    telegram, site, store: activeStore, accessCode: 'secret', now: () => clock.now, log: () => {},
+    telegram, site, store: activeStore, accessCode: 'secret', renderImage, now: () => clock.now, log: () => {},
   });
   const app = make(store);
   const say = (text, chatId = CHAT) => app.handleUpdate({ message: { chat: { id: chatId, type: 'private' }, text } });
@@ -86,7 +96,7 @@ function setup({ fact, houses } = {}) {
     await say(street, chatId);
     await say(number, chatId);
   };
-  return { app, make, say, tap, last, addresses, addAddress, sent, site, telegram, clock, store, path };
+  return { app, make, say, tap, last, addresses, addAddress, sent, site, telegram, clock, store, path, images };
 }
 
 async function registered(options) {
@@ -148,11 +158,11 @@ test('an invited user walks through city, street and house and gets the schedule
   assert.match(message, /Адресу додано/);
   assert.match(message, /за 15 хв/);
   assert.match(message, /с\. Білогородка, вул\. Садова, 12/);
-  assert.match(message, /Черга 4\.2/);
+  assert.match(message, /черга 4\.2/);
   assert.match(message, /11:00–12:00/);
-  assert.match(message, /Зі світлом: 23 год/);
-  assert.match(message, /Без світла: 1 год/);
-  assert.match(message, /Завтра[\s\S]*ще не опубліковано/);
+  assert.match(message, /💡 23 год/);
+  assert.match(message, /🌑 1 год: 11:00–12:00/);
+  assert.match(message, /Завтра, сб 07\.11:<\/b> графіка ще немає/);
   assert.match(message, /06\.11\.2026 08:00/);
   assert.equal(addresses()[0].group, 'GPV4.2');
 });
@@ -208,8 +218,8 @@ test('the schedule button shows every address, each with its own queue', async (
   const { say, sent } = await registeredWithTwo();
   await say('📅 Графік');
   assert.equal(sent.length, 2);
-  assert.match(sent[0].text, /вул\. Садова, 12[\s\S]*Черга 4\.2[\s\S]*11:00–12:00/);
-  assert.match(sent[1].text, /вул\. Шляхова, 40[\s\S]*Черга 3\.1[\s\S]*14:00–15:00/);
+  assert.match(sent[0].text, /вул\. Садова, 12[\s\S]*черга 4\.2[\s\S]*11:00–12:00/);
+  assert.match(sent[1].text, /вул\. Шляхова, 40[\s\S]*черга 3\.1[\s\S]*14:00–15:00/);
 });
 
 test('the list shows addresses with buttons, and a button shows only that address', async () => {
@@ -319,7 +329,7 @@ test('a city without streets skips straight to the result', async () => {
   await say('/start secret');
   await say('Без Вулиць');
   assert.match(last().text, /Адресу додано/);
-  assert.match(last().text, /с\. Без Вулиць\n/);
+  assert.match(last().text, /с\. Без Вулиць · черга 3\.1/);
   assert.equal(addresses()[0].group, 'GPV3.1');
 });
 
@@ -406,7 +416,7 @@ test('schedule change reaches the user once, an unrelated update does not', asyn
   assert.equal(sent.length, 1);
   assert.match(last().text, /Графік змінився/);
   assert.match(last().text, /11:00–12:30/);
-  assert.match(last().text, /Без світла: 1 год 30 хв/);
+  assert.match(last().text, /🌑 1 год 30 хв: 11:00–12:30/);
   assert.match(last().text, /06\.11\.2026 10:30/);
   await app.pollSite();
   assert.equal(sent.length, 1);
@@ -425,15 +435,15 @@ test('a change reports only the addresses whose queue changed', async () => {
 test('one undelivered change is retried without resending the delivered ones', async () => {
   const { app, site, telegram, sent } = await registeredWithTwo();
   site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': allYes({ 14: 'no' }), 'GPV3.1': allYes({ 16: 'no' }) } }, update: '06.11.2026 10:00' };
-  const original = telegram.sendMessage;
-  telegram.sendMessage = async (chatId, text, extra) => {
+  const original = telegram.sendPhoto;
+  telegram.sendPhoto = async (chatId, photo, text, extra) => {
     if (/вул\. Шляхова/.test(text)) throw new Error('telegram hiccup');
-    return original(chatId, text, extra);
+    return original(chatId, photo, text, extra);
   };
   await app.pollSite();
   assert.equal(sent.length, 1);
   assert.match(sent[0].text, /вул\. Садова/);
-  telegram.sendMessage = original;
+  telegram.sendPhoto = original;
   await app.pollSite();
   assert.equal(sent.length, 2);
   assert.match(sent[1].text, /Графік змінився[\s\S]*вул\. Шляхова/);
@@ -453,6 +463,89 @@ test('tomorrow being published is announced, the next midnight is not a change',
   site.pendingUpdate = { data: { [TOMORROW]: { 'GPV4.2': allYes({ 2: 'second' }) } }, update: '07.11.2026 00:05' };
   await app.pollSite();
   assert.equal(sent.length, 1);
+});
+
+test('a change sends only the day that changed, the button shows both', async () => {
+  const { app, site, say, sent, last } = await registered();
+  site.pendingUpdate = {
+    data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no' }) }, [TOMORROW]: { 'GPV4.2': allYes({ 2: 'second' }) } },
+    update: '06.11.2026 20:00',
+  };
+  await app.pollSite();
+  assert.match(last().text, /Завтра, сб 07\.11/);
+  assert.doesNotMatch(last().text, /Сьогодні/, 'today did not change');
+  site.pendingUpdate = {
+    data: { [TODAY]: { 'GPV4.2': allYes({ 14: 'no' }) }, [TOMORROW]: { 'GPV4.2': allYes({ 2: 'second' }) } },
+    update: '06.11.2026 21:00',
+  };
+  await app.pollSite();
+  assert.match(last().text, /Графік змінився[\s\S]*Сьогодні, пт 06\.11/);
+  assert.doesNotMatch(last().text, /Завтра/, 'tomorrow did not change');
+  sent.length = 0;
+  await say('/schedule');
+  assert.match(last().text, /Сьогодні[\s\S]*Завтра/);
+});
+
+test('a withdrawn schedule says so instead of showing nothing', async () => {
+  const { app, site, last } = await registered();
+  site.pendingUpdate = { data: {}, update: '06.11.2026 10:00' };
+  await app.pollSite();
+  assert.match(last().text, /Графік змінився[\s\S]*Сьогодні, пт 06\.11:<\/b> графіка ще немає/);
+});
+
+test('the schedule goes out as a picture with the text as its caption', async () => {
+  const { say, last, images } = await registered();
+  images.drawn.length = 0;
+  await say('/schedule');
+  assert.equal(last().photo.toString(), 'png');
+  assert.match(last().text, /с\. Білогородка, вул\. Садова, 12 · черга 4\.2/);
+  assert.match(last().text, /🌑 1 год: 11:00–12:00/);
+  assert.ok(last().extra.reply_markup.keyboard, 'the menu stays');
+  const [schedule] = images.drawn;
+  assert.equal(schedule.address, 'с. Білогородка, вул. Садова, 12');
+  assert.equal(schedule.group, '4.2');
+  assert.equal(schedule.update, '06.11.2026 08:00');
+  assert.deepEqual(schedule.days.map((day) => day.title), ['Сьогодні, пт 06.11', 'Завтра, сб 07.11']);
+  assert.equal(schedule.days[0].row[12], 'no');
+  assert.equal(schedule.days[0].nowMinutes, 9 * 60, 'the marker is on today');
+  assert.equal(schedule.days[1].nowMinutes, undefined);
+  assert.equal(schedule.days[1].row, undefined);
+});
+
+test('a new address and a schedule change come as pictures too', async () => {
+  const { app, addAddress, site, last, images } = await registered();
+  await addAddress('Шляхова', '40');
+  assert.equal(last().photo.toString(), 'png');
+  assert.match(last().text, /Адресу додано/);
+  images.drawn.length = 0;
+  site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': allYes({ 14: 'no' }), 'GPV3.1': allYes({ 15: 'no' }) } }, update: '06.11.2026 10:00' };
+  await app.pollSite();
+  assert.equal(last().photo.toString(), 'png');
+  assert.deepEqual(images.drawn[0].days.map((day) => day.title), ['Сьогодні, пт 06.11'], 'only the changed day');
+});
+
+test('if the picture cannot be drawn, the schedule still arrives as text', async () => {
+  const { say, last, images } = await registered();
+  images.failing = true;
+  await say('/schedule');
+  assert.equal(last().photo, undefined);
+  assert.match(last().text, /🌑 1 год: 11:00–12:00/);
+  assert.ok(last().extra.reply_markup.keyboard);
+});
+
+test('text too long for a caption follows the picture as its own message', async () => {
+  const { say, sent, site } = await registered();
+  site.houses = {
+    12: {
+      sub_type: 'д'.repeat(1100), start_date: 'a', end_date: 'b', type: '2', sub_type_reason: ['GPV4.2'],
+    },
+  };
+  sent.length = 0;
+  await say('/schedule');
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].photo.toString(), 'png');
+  assert.equal(sent[0].text, '');
+  assert.match(sent[1].text, /Зараз за адресою немає світла/);
 });
 
 test('addresses and a change while the bot was off survive a restart', async () => {
@@ -500,7 +593,7 @@ test('a reassigned queue follows the address and names it', async () => {
   await say('/schedule');
   assert.equal(addresses()[0].group, 'GPV3.1');
   assert.match(sent[0].text, /с\. Білогородка, вул\. Садова, 12 змінилася: 4\.2 → 3\.1/);
-  assert.match(sent[1].text, /Черга 3\.1/);
+  assert.match(sent[1].text, /черга 3\.1/);
 });
 
 test('the periodic address check also catches a reassigned queue', async () => {

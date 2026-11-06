@@ -65,7 +65,7 @@ export function formatDuration(minutes) {
   return `${rest} хв`;
 }
 
-function rowStates(row) {
+export function rowStates(row) {
   const states = [];
   for (let hour = 1; hour <= 24; hour++) {
     states.push(...(HALVES[row[hour]] ?? HALVES.maybe));
@@ -135,6 +135,16 @@ export function outageStarts(fact, group) {
   return starts;
 }
 
+// What the schedule says for a moment in time, and until when that stays true.
+export function scheduleAt(fact, group, at) {
+  const slots = buildTimeline(fact, group);
+  const index = slots.findIndex((slot) => slot.start <= at && at < slot.end);
+  if (index < 0) return null;
+  let last = index;
+  while (last + 1 < slots.length && slots[last + 1].state === slots[index].state) last++;
+  return { state: slots[index].state, until: slots[last].end, openEnded: last === slots.length - 1 };
+}
+
 // Per-day fingerprint of one group, kept per user to detect what that user has not been told yet.
 export function snapshot(fact, group) {
   const result = {};
@@ -149,13 +159,22 @@ export function diffSnapshots(seen, current, nowMs) {
   const today = Number(dayKey(nowMs));
   let changed = false;
   let added = false;
+  const days = new Set();
   for (const [key, value] of Object.entries(current)) {
     if (Number(key) < today) continue;
-    if (!(key in seen)) added = true;
-    else if (seen[key] !== value) changed = true;
+    if (!(key in seen)) {
+      added = true;
+      days.add(key);
+    } else if (seen[key] !== value) {
+      changed = true;
+      days.add(key);
+    }
   }
   for (const key of Object.keys(seen)) {
-    if (Number(key) >= today && !(key in current)) changed = true;
+    if (Number(key) >= today && !(key in current)) {
+      changed = true;
+      days.add(key);
+    }
   }
-  return { changed, added };
+  return { changed, added, days: [...days].sort((a, b) => Number(a) - Number(b)) };
 }

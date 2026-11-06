@@ -1,3 +1,4 @@
+import { renderScheduleImage } from './chart.js';
 import {
   dayKey, diffSnapshots, formatClock, formatDayLabel, formatDuration, outageStarts, snapshot, summarizeDay,
 } from './schedule.js';
@@ -13,6 +14,7 @@ const MENU = {
 };
 const MAX_OPTIONS = 10;
 const MAX_ADDRESSES = 10;
+const MAX_CAPTION_LENGTH = 1024;
 const FULL_RELOAD_MS = 30 * 60000;
 const SITE_ALERT_AFTER_MS = 30 * 60000;
 const DAY_MS = 24 * 60 * 60000;
@@ -47,7 +49,9 @@ export function findMatches(names, query) {
 
 const houseKey = (text) => fold(text).replace(/\s/g, '');
 
-export function createApp({ telegram, site, store, accessCode, warnMinutes = 15, now = Date.now, log = console.error }) {
+export function createApp({
+  telegram, site, store, accessCode, power, renderImage = renderScheduleImage, warnMinutes = 15, now = Date.now, log = console.error,
+}) {
   const dialogs = new Map();
   let streets = null;
   let lastFullLoad = 0;
@@ -63,16 +67,21 @@ export function createApp({ telegram, site, store, accessCode, warnMinutes = 15,
   }
 
   function renderDay(title, row) {
-    if (!row) return `<b>${title}</b>\nГрафік ще не опубліковано.`;
+    if (!row) return `<b>${title}:</b> графіка ще немає`;
     const { totals, intervals } = summarizeDay(row);
-    const list = (items) => items.map((item) => `• ${item.from}–${item.to}`);
+    const list = (items) => items.map((item) => `${item.from}–${item.to}`).join(', ');
     const lines = [`<b>${title}</b>`];
-    if (intervals.off.length) lines.push('Без світла:', ...list(intervals.off));
-    else lines.push('Відключень немає.');
-    if (intervals.maybe.length) lines.push('Можливо без світла:', ...list(intervals.maybe));
-    lines.push(`💡 Зі світлом: ${formatDuration(totals.on)}`, `🌑 Без світла: ${formatDuration(totals.off)}`);
-    if (totals.maybe) lines.push(`❔ Можливо без світла: ${formatDuration(totals.maybe)}`);
+    if (intervals.off.length) lines.push(`🌑 ${formatDuration(totals.off)}: ${list(intervals.off)}`);
+    if (intervals.maybe.length) lines.push(`❔ ${formatDuration(totals.maybe)}: ${list(intervals.maybe)}`);
+    lines.push(`💡 ${formatDuration(totals.on)}`);
     return lines.join('\n');
+  }
+
+  function dayTitle(key) {
+    const label = formatDayLabel(key);
+    if (key === dayKey(now())) return `Сьогодні, ${label}`;
+    if (key === dayKey(now(), 1)) return `Завтра, ${label}`;
+    return label;
   }
 
   // Same conditions as the site: it only shows this block for types 1 and 2.
@@ -91,15 +100,12 @@ export function createApp({ telegram, site, store, accessCode, warnMinutes = 15,
     return lines.join('\n');
   }
 
-  function renderSchedule(address, info, heading) {
-    const today = dayKey(now());
-    const tomorrow = dayKey(now(), 1);
+  function renderSchedule(address, info, heading, days = [dayKey(now()), dayKey(now(), 1)]) {
     const parts = [
       heading,
-      `📍 ${escapeHtml(addressLabel(address))}\nЧерга ${groupLabel(address.group)}`,
+      `📍 ${escapeHtml(addressLabel(address))} · черга ${groupLabel(address.group)}`,
       renderCurrentOutage(info),
-      renderDay(`Сьогодні, ${formatDayLabel(today)}`, store.fact?.data?.[today]?.[address.group]),
-      renderDay(`Завтра, ${formatDayLabel(tomorrow)}`, store.fact?.data?.[tomorrow]?.[address.group]),
+      ...days.map((key) => renderDay(dayTitle(key), store.fact?.data?.[key]?.[address.group])),
       `Оновлено на сайті: ${escapeHtml(store.fact?.update || 'немає даних')}`,
       siteDownSince ? '⚠️ Сайт зараз не відповідає, це останній отриманий графік.' : null,
     ];
@@ -125,9 +131,43 @@ export function createApp({ telegram, site, store, accessCode, warnMinutes = 15,
     return info ?? null;
   }
 
-  async function sendSchedule(chatId, address, heading) {
+  // A drawing problem must not cost anyone their schedule, so the plain text is the fallback.
+  function drawSchedule(address, days) {
+    const today = dayKey(now());
+    const [hours, minutes] = formatClock(now()).split(':').map(Number);
+    try {
+      return renderImage({
+        address: addressLabel(address),
+        group: groupLabel(address.group),
+        update: store.fact?.update,
+        days: days.map((key) => ({
+          title: dayTitle(key),
+          row: store.fact?.data?.[key]?.[address.group],
+          nowMinutes: key === today ? hours * 60 + minutes : undefined,
+        })),
+      });
+    } catch (error) {
+      log(`Картинка не нарисована: ${error.message}`);
+      return null;
+    }
+  }
+
+  async function deliverSchedule(chatId, address, info, heading, days = [dayKey(now()), dayKey(now(), 1)]) {
+    const text = renderSchedule(address, info, heading, days);
+    const image = drawSchedule(address, days);
+    if (!image) {
+      await send(chatId, text);
+    } else if (text.length <= MAX_CAPTION_LENGTH) {
+      await telegram.sendPhoto(chatId, image, text, MENU);
+    } else {
+      await telegram.sendPhoto(chatId, image, '', MENU);
+      await send(chatId, text);
+    }
+  }
+
+  async function sendSchedule(chatId, address, heading, days) {
     const info = await syncAddress(chatId, address);
-    await send(chatId, renderSchedule(address, info, heading));
+    await deliverSchedule(chatId, address, info, heading, days);
   }
 
   async function ensureStreets() {
@@ -184,7 +224,7 @@ export function createApp({ telegram, site, store, accessCode, warnMinutes = 15,
     user.addresses.push(address);
     store.save();
     const heading = `✅ <b>Адресу додано</b>\nПовідомлятиму про зміни графіка та попереджатиму за ${warnMinutes} хв до відключення.`;
-    await send(chatId, renderSchedule(address, dialog.houses[house], heading));
+    await deliverSchedule(chatId, address, dialog.houses[house], heading);
   }
 
   async function chooseHouse(chatId, dialog, house) {
@@ -322,6 +362,11 @@ export function createApp({ telegram, site, store, accessCode, warnMinutes = 15,
       await showAddresses(chatId, user);
       return;
     }
+    if (command === '/power') {
+      dialogs.delete(chatId);
+      await send(chatId, power ? power.toggle(user) : 'Датчик світла не налаштований.');
+      return;
+    }
     if (command === '/schedule' || command === '/start' || text === BUTTON_SCHEDULE) {
       dialogs.delete(chatId);
       if (!user.addresses.length) {
@@ -378,11 +423,11 @@ export function createApp({ telegram, site, store, accessCode, warnMinutes = 15,
     for (const [chatId, user] of store.users()) {
       for (const address of user.addresses) {
         const current = snapshot(store.fact, address.group);
-        const { changed, added } = diffSnapshots(address.seen, current, now());
+        const { changed, added, days } = diffSnapshots(address.seen, current, now());
         if (changed || added) {
           const heading = changed ? '🔄 <b>Графік змінився</b>' : '🆕 <b>Опубліковано новий графік</b>';
           try {
-            await sendSchedule(chatId, address, heading);
+            await sendSchedule(chatId, address, heading, days);
           } catch (error) {
             log(`Не отправлено ${chatId}: ${error.message}`);
             continue;

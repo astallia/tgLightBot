@@ -18,6 +18,12 @@ export function createStore(path) {
     set fact(value) {
       state.fact = value;
     },
+    get power() {
+      return state.power;
+    },
+    set power(value) {
+      state.power = value;
+    },
     users: () => Object.entries(state.users),
     getUser: (chatId) => state.users[chatId],
     addUser: (chatId) => {

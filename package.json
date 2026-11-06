@@ -10,5 +10,8 @@
   "scripts": {
     "start": "node --env-file=.env src/index.js",
     "test": "node --test"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "2.6.2"
   }
 }
