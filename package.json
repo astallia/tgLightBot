@@ -8,10 +8,12 @@
     "node": ">=22"
   },
   "scripts": {
-    "start": "node --env-file=.env src/index.js",
+    "start": "node src/index.js",
+    "start:local": "node --env-file=.env src/index.js",
     "test": "node --test"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.2.0",
     "@resvg/resvg-js": "2.6.2"
   }
 }

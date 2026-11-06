@@ -84,6 +84,36 @@ npm ci
    sudo journalctl -u dtek-svet-bot -f
    ```
 
+## Бесплатный хостинг: Render + Neon
+
+В этом режиме ноутбук после настройки не нужен. Render принимает сообщения Telegram через webhook,
+а Neon постоянно хранит адреса и последний график в одной JSON-записи. История графиков не копится:
+новое состояние заменяет предыдущее, а неизменившееся состояние повторно в базу не записывается.
+
+1. Создайте бесплатный проект в Neon и скопируйте строку подключения `DATABASE_URL`.
+2. Создайте в Render Web Service из этого репозитория. Файл `render.yaml` задаёт бесплатный тариф,
+   `npm ci`, `npm start` и проверку `/healthz`.
+3. В Render задайте секреты `BOT_TOKEN`, `ACCESS_CODE` и `DATABASE_URL`. Значения
+   `WEBHOOK_SECRET` и `CRON_SECRET` Render создаст автоматически.
+4. После успешного deploy скопируйте значение `CRON_SECRET`. В бесплатном HTTP-планировщике создайте
+   запрос каждые 2 минуты:
+
+   ```text
+   POST https://ИМЯ-СЕРВИСА.onrender.com/tasks/tick
+   Authorization: Bearer ЗНАЧЕНИЕ_CRON_SECRET
+   Content-Type: application/json
+   Body: {}
+   ```
+
+   Этот запрос запускает проверку ДТЭК и предупреждений и не даёт бесплатному сервису Render уснуть.
+
+Если в локальном `data/state.json` уже есть пользователи, добавьте `DATABASE_URL` в `.env` и один раз
+загрузите состояние до запуска Render:
+
+```bash
+node --env-file=.env tools/upload-state.js
+```
+
 ## Настройки
 
 Необязательные параметры в `.env`:
@@ -93,6 +123,9 @@ npm ci
 | `POLL_SECONDS` | `120` | Как часто проверять сайт |
 | `WARN_MINUTES` | `15` | За сколько минут предупреждать |
 | `DATA_FILE` | `data/state.json` | Где хранить адреса пользователей и последний график |
+| `DATABASE_URL` | — | Подключение Neon; включает режим webhook для хостинга |
+| `WEBHOOK_SECRET` | — | Секрет проверки запросов Telegram |
+| `CRON_SECRET` | — | Секрет планового endpoint `/tasks/tick` |
 
 ## Как это устроено
 
