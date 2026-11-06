@@ -41,5 +41,12 @@ export function createTelegram({ token, baseUrl = 'https://api.telegram.org' }) 
     }),
     answerCallbackQuery: (id) => call('answerCallbackQuery', { callback_query_id: id }),
     setMyCommands: (commands) => call('setMyCommands', { commands }),
+    setWebhook: (url, secretToken) => call('setWebhook', {
+      url,
+      secret_token: secretToken,
+      allowed_updates: ['message', 'callback_query'],
+      drop_pending_updates: false,
+    }),
+    deleteWebhook: () => call('deleteWebhook', { drop_pending_updates: false }),
   };
 }
