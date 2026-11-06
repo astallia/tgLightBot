@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  dayKey, diffSnapshots, formatDuration, outageStarts, snapshot, summarizeDay, wallToEpoch,
+  clockMinutes, dayKey, diffSnapshots, formatDuration, outageStarts, snapshot, summarizeDay, wallToEpoch,
 } from '../src/schedule.js';
 
 // Real row of queue 4.2 from the site on 06.11.2026.
@@ -54,6 +54,12 @@ test('a day with no outages has no off intervals', () => {
   const { intervals, totals } = summarizeDay(allYes());
   assert.deepEqual(intervals.off, []);
   assert.equal(totals.on, 24 * 60);
+});
+
+test('a clock time converts to minutes, including the end of the day', () => {
+  assert.equal(clockMinutes('00:00'), 0);
+  assert.equal(clockMinutes('07:30'), 450);
+  assert.equal(clockMinutes('24:00'), 1440);
 });
 
 test('durations read naturally', () => {

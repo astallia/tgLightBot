@@ -7,23 +7,21 @@ const allYes = (overrides = {}) => {
   for (let hour = 1; hour <= 24; hour++) row[hour] = 'yes';
   return { ...row, ...overrides };
 };
-const ON = '#FFD23F';
+const ON = '#F2A900';
 const OFF = '#2A2E45';
+const MAYBE = '#9AA0B8';
 
 const card = ({ row, nowMinutes }, extra = {}) => ({
   address: 'с. Гатне, вул. Шляхова, 4',
   queues: 'черга 3.2',
-  update: '06.11.2026 15:09',
   days: [{ title: 'Сьогодні', lines: row ? [{ row }] : [], nowMinutes }],
   ...extra,
 });
 
-function tileFills(svg, hour) {
-  const start = svg.indexOf(`data-hour="${hour}"`);
-  const shapeStart = svg.lastIndexOf('<', start);
-  if (svg.startsWith('<rect', shapeStart)) return [svg.slice(shapeStart).match(/fill="([^"]+)"/)[1]];
-  const group = svg.slice(shapeStart, svg.indexOf('</g>', shapeStart));
-  return [...group.matchAll(/fill="([^"]+)"/g)].map((match) => match[1]);
+// The stretches drawn on the picture: [first half hour, half hour after the last, colour].
+function stretches(svg) {
+  return [...svg.matchAll(/width="([\d.]+)"[^>]*fill="([^"]+)" data-from="(\d+)" data-to="(\d+)"/g)]
+    .map((match) => [Number(match[3]), Number(match[4]), match[2]]);
 }
 
 test('it produces a real PNG, Ukrainian letters and all', () => {
@@ -32,22 +30,97 @@ test('it produces a real PNG, Ukrainian letters and all', () => {
   assert.ok(png.length > 5000, 'a card with text is not an empty picture');
 });
 
-test('every hour is drawn with the right half hours', () => {
-  const svg = buildScheduleSvg(card({ row: allYes({ 1: 'no', 2: 'first', 3: 'second', 4: 'maybe', 5: 'mfirst', 6: 'msecond' }) }));
-  assert.deepEqual(tileFills(svg, 0), [OFF]);
-  assert.deepEqual(tileFills(svg, 1), [OFF, ON], 'no light in the first half');
-  assert.deepEqual(tileFills(svg, 2), [ON, OFF], 'no light in the second half');
-  assert.deepEqual(tileFills(svg, 3), ['url(#maybe)']);
-  assert.deepEqual(tileFills(svg, 4), ['url(#maybe)', ON]);
-  assert.deepEqual(tileFills(svg, 5), [ON, 'url(#maybe)']);
-  assert.deepEqual(tileFills(svg, 23), [ON]);
+test('stretches of one state are one bar, down to the half hour', () => {
+  const svg = buildScheduleSvg(card({ row: allYes({ 1: 'no', 2: 'first', 4: 'second', 6: 'maybe', 7: 'mfirst', 9: 'msecond' }) }));
+  assert.deepEqual(stretches(svg), [
+    [0, 3, OFF], // 00:00-01:30: a whole hour, then the first half of the next
+    [3, 7, ON],
+    [7, 8, OFF], // 03:30-04:00: the second half
+    [8, 10, ON],
+    [10, 13, MAYBE], // 05:00-06:30: a possible hour, then a possible first half
+    [13, 17, ON],
+    [17, 18, MAYBE], // 08:30-09:00: a possible second half
+    [18, 24, ON],
+    [24, 48, ON],
+  ]);
 });
 
-test('all 24 hours are labelled', () => {
+test('an outage over noon is cut at the end of the row and continues on the next', () => {
+  const svg = buildScheduleSvg(card({ row: allYes({ 12: 'no', 13: 'no' }) }));
+  assert.deepEqual(stretches(svg), [[0, 22, ON], [22, 24, OFF], [24, 26, OFF], [26, 48, ON]]);
+});
+
+test('bars fill each row exactly, so a position on the row is a true time', () => {
   const svg = buildScheduleSvg(card({ row: allYes() }));
-  for (let hour = 0; hour < 24; hour++) {
-    assert.ok(svg.includes(`>${String(hour).padStart(2, '0')}</text>`), `hour ${hour}`);
-  }
+  const [first, second] = [...svg.matchAll(/<rect x="([\d.]+)"[^>]*width="([\d.]+)"[^>]*data-from/g)]
+    .map((match) => [Number(match[1]), Number(match[2])]);
+  assert.deepEqual(first, [48, 984]);
+  assert.deepEqual(second, [48, 984]);
+});
+
+const clockLabels = (svg) => [...svg.matchAll(/>(\d\d:\d\d)<\/text>/g)].map((match) => match[1]);
+
+test('with no changes only the ends of the rows are labelled', () => {
+  assert.deepEqual(clockLabels(buildScheduleSvg(card({ row: allYes() }))), ['00:00', '12:00', '12:00', '24:00']);
+});
+
+test('every bar is labelled where it starts and where it ends', () => {
+  // Real queue 2.2: dark 00:00-01:00, 07:30-15:00, 18:00-24:00.
+  const row = allYes({ 1: 'no', 8: 'second', 9: 'no', 10: 'no', 11: 'no', 12: 'no', 13: 'no', 14: 'no', 15: 'no', 19: 'no', 20: 'no', 21: 'no', 22: 'no', 23: 'no', 24: 'no' });
+  assert.deepEqual(clockLabels(buildScheduleSvg(card({ row }))), [
+    '00:00', '01:00', '07:30', '12:00',
+    '12:00', '15:00', '18:00', '24:00',
+  ]);
+});
+
+test('half hours are labelled too', () => {
+  const labels = clockLabels(buildScheduleSvg(card({ row: allYes({ 2: 'first', 16: 'second' }) })));
+  assert.deepEqual(labels, ['00:00', '01:00', '01:30', '12:00', '12:00', '15:30', '16:00', '24:00']);
+});
+
+// Where each label was put: [left edge, baseline], read from the white box behind it.
+function labelBoxes(svg) {
+  return [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="80" height="36"/g)]
+    .map((match) => [Number(match[1]), Number(match[2])]);
+}
+
+test('labels never touch, even with a change every half hour, and none is dropped', () => {
+  const row = allYes();
+  for (let hour = 1; hour <= 24; hour += 2) row[hour] = 'first';
+  for (let hour = 2; hour <= 24; hour += 2) row[hour] = 'second';
+  const svg = buildScheduleSvg(card({ row }));
+  const boxes = labelBoxes(svg);
+  assert.ok(boxes.length >= 24, `labels: ${boxes.length}`);
+  boxes.forEach(([x, y], index) => {
+    for (const [otherX, otherY] of boxes.slice(index + 1)) {
+      const sameLevel = y === otherY;
+      // The boxes behind the labels are 2px wider than the labels on each side.
+      const overlap = x + 2 < otherX + 78 && otherX + 2 < x + 78;
+      assert.ok(!(sameLevel && overlap), `labels at ${x} and ${otherX} on level ${y}`);
+    }
+  });
+  assert.ok(boxes.every(([x]) => x >= 0 && x + 80 <= 1080), 'all labels stay on the picture');
+});
+
+test('the labels of an hour-long bar stay side by side on one level', () => {
+  const svg = buildScheduleSvg(card({ row: allYes({ 1: 'no', 5: 'no' }) }));
+  // The first row: 00:00, 01:00, 04:00, 05:00, 12:00.
+  const levels = new Set(labelBoxes(svg).slice(0, 5).map(([, y]) => y));
+  assert.equal(levels.size, 1);
+});
+
+test('half-hour bars move a label down a level', () => {
+  const svg = buildScheduleSvg(card({ row: allYes({ 5: 'first' }) }));
+  const levels = new Set(labelBoxes(svg).slice(0, 4).map(([, y]) => y));
+  assert.equal(levels.size, 2);
+});
+
+test('lower labels push the next row down instead of running into it', () => {
+  const tight = allYes({ 2: 'first', 3: 'first', 4: 'first' });
+  const svg = buildScheduleSvg(card({ row: tight }));
+  const [, secondRowTop] = svg.match(/y="([\d.]+)"[^>]*data-from="24"/);
+  const lowest = Math.max(...labelBoxes(svg).slice(0, 8).map(([, y]) => y));
+  assert.ok(Number(secondRowTop) > lowest);
 });
 
 test('totals are in the legend, and the possible ones only when there are any', () => {
@@ -68,14 +141,14 @@ test('the now marker appears only for the day that has it, at the right time', (
 test('the marker stays inside the picture at both ends of the day', () => {
   for (const nowMinutes of [0, 719, 720, 1439]) {
     const svg = buildScheduleSvg(card({ row: allYes(), nowMinutes }));
-    const pill = svg.match(/<rect x="([\d.]+)" y="[\d.]+" width="104"/);
-    assert.ok(Number(pill[1]) >= 48 && Number(pill[1]) + 104 <= 1032, `pill at ${nowMinutes}`);
+    const pill = svg.match(/<rect x="([\d.]+)" y="[\d.]+" width="(\d+)"[^>]*data-pill/);
+    assert.ok(Number(pill[1]) >= 48 && Number(pill[1]) + Number(pill[2]) <= 1032, `pill at ${nowMinutes}`);
   }
 });
 
 test('several days are drawn in order', () => {
   const svg = buildScheduleSvg({
-    address: 'а', queues: 'черга 1.1', update: 'u', days: [{ title: 'Сьогодні', lines: [{ row: allYes() }] }, { title: 'Завтра', lines: [{ row: allYes() }] }],
+    address: 'а', queues: 'черга 1.1', days: [{ title: 'Сьогодні', lines: [{ row: allYes() }] }, { title: 'Завтра', lines: [{ row: allYes() }] }],
   });
   assert.ok(svg.indexOf('Сьогодні') < svg.indexOf('Завтра'));
 });
@@ -95,7 +168,6 @@ test('a house on two lines shows each one, named, and still renders', () => {
   const schedule = {
     address: 'м. Переяслав, вул. Шкільна, 44',
     queues: 'черги 6.2, 4.1',
-    update: 'u',
     days: [{
       title: 'Сьогодні',
       nowMinutes: 600,
@@ -105,10 +177,8 @@ test('a house on two lines shows each one, named, and still renders', () => {
   const svg = buildScheduleSvg(schedule);
   assert.match(svg, /черги 6\.2, 4\.1/);
   assert.ok(svg.indexOf('Черга 6.2') < svg.indexOf('Черга 4.1'));
-  assert.equal((svg.match(/data-hour="0"/g) ?? []).length, 2, 'two lines, two drawings of each hour');
+  assert.equal((svg.match(/data-from="0"/g) ?? []).length, 2, 'two lines, each drawn from the start of the day');
   assert.equal((svg.match(/data-now=/g) ?? []).length, 2, 'the marker is on both lines');
-  const ids = [...svg.matchAll(/clipPath id="([^"]+)"/g)].map((match) => match[1]);
-  assert.equal(new Set(ids).size, ids.length, 'clip ids do not collide between lines');
   assert.ok(renderScheduleImage(schedule).length > 5000);
 });
 

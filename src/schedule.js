@@ -46,6 +46,11 @@ export function dayKey(epochMs, addDays = 0) {
   return String(wallToEpoch(year, month, day + addDays) / 1000);
 }
 
+export function clockMinutes(clock) {
+  const [hours, minutes] = clock.split(':').map(Number);
+  return hours * 60 + minutes;
+}
+
 export function formatClock(epochMs) {
   return new Intl.DateTimeFormat('uk-UA', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }).format(epochMs);
 }

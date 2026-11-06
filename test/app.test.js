@@ -159,8 +159,8 @@ test('an invited user walks through city, street and house and gets the schedule
   assert.match(message, /за 15 хв/);
   assert.doesNotMatch(message, /Білогородка|черга/, 'one address needs no naming');
   assert.match(message, /11:00–12:00/);
-  assert.match(message, /💡 23 год/);
-  assert.match(message, /🌑 1 год:\n<b>11:00–12:00/);
+  assert.match(message, /💡 Світло 23 год/);
+  assert.match(message, /🌑 Без світла 1 год:\n👉 <b>11:00–12:00/);
   assert.doesNotMatch(message, /Завтра/, 'a day with no schedule is not mentioned');
   assert.doesNotMatch(message, /Оновлено/);
   assert.deepEqual(addresses()[0].groups, ['GPV4.2']);
@@ -194,8 +194,8 @@ test('following all lines keeps both queues and says so everywhere', async () =>
   assert.equal(address.allLines, true);
   assert.match(last().text, /Адресу додано/);
   assert.match(last().text, /черги 4\.2, 3\.1/);
-  assert.match(last().text, /Черга 4\.2\n🌑 1 год:\n<b>11:00–12:00/);
-  assert.match(last().text, /Черга 3\.1\n🌑 1 год:\n<b>14:00–15:00/);
+  assert.match(last().text, /Черга 4\.2\n🌑 Без світла 1 год:\n👉 <b>11:00–12:00/);
+  assert.match(last().text, /Черга 3\.1\n🌑 Без світла 1 год:\n👉 <b>14:00–15:00/);
   await say('📍 Мої адреси');
   assert.match(last().text, /вул\. Шляхова, 20, черги 4\.2, 3\.1/);
   sent.length = 0;
@@ -252,7 +252,7 @@ test('lines on the same schedule are shown as one', async () => {
   const ctx = await registered({ fact });
   await ctx.addAddress('Шляхова', '20');
   await ctx.tap('group:2');
-  assert.match(ctx.last().text, /Черги 4\.2, 3\.1\n🌑 1 год:\n<b>11:00–12:00/);
+  assert.match(ctx.last().text, /Черги 4\.2, 3\.1\n🌑 Без світла 1 год:\n👉 <b>11:00–12:00/);
   assert.deepEqual(ctx.images.drawn.at(-1).days[0].lines.map((line) => line.label), ['Черги 4.2, 3.1']);
 });
 
@@ -553,7 +553,7 @@ test('a button still works when Telegram refuses to acknowledge it', async () =>
   const { tap, last, telegram, addresses } = await registered();
   telegram.answerFailing = true;
   await tap(`show:${addresses()[0].id}`);
-  assert.match(last().text, /🌑 1 год/);
+  assert.match(last().text, /🌑 Без світла 1 год/);
 });
 
 test('a city without streets skips straight to the result', async () => {
@@ -649,7 +649,7 @@ test('schedule change reaches the user once, an unrelated update does not', asyn
   assert.equal(sent.length, 1);
   assert.match(last().text, /Графік змінився/);
   assert.match(last().text, /11:00–12:30/);
-  assert.match(last().text, /🌑 1 год 30 хв:\n<b>11:00–12:30/);
+  assert.match(last().text, /🌑 Без світла 1 год 30 хв:\n👉 <b>11:00–12:30/);
   await app.pollSite();
   assert.equal(sent.length, 1);
 });
@@ -765,12 +765,66 @@ test('no schedule at all gets a short answer in text, not an empty picture', asy
   assert.equal(images.drawn.length, 0);
 });
 
+test('an outage in progress is marked, and the pointer moves to the one after it', async () => {
+  const fact = { data: { [TODAY]: { 'GPV4.2': allYes({ 1: 'no', 12: 'no', 16: 'no', 20: 'no' }) } }, update: 'u' };
+  const { say, last, clock } = await registered({ fact });
+  clock.now = at(11, 20);
+  await say('/schedule');
+  assert.equal(last().text, [
+    '<b>Сьогодні, пт 06.11</b>',
+    '🌑 Без світла 4 год:',
+    '<s>00:00–01:00 · 1 год</s>',
+    '🔴 <b>11:00–12:00</b> · 1 год · зараз',
+    '👉 <b>15:00–16:00</b> · 1 год',
+    '<b>19:00–20:00</b> · 1 год',
+    '💡 Світло 20 год',
+  ].join('\n'));
+});
+
+test('an outage ending exactly now has passed, one starting exactly now is in progress', async () => {
+  const fact = { data: { [TODAY]: { 'GPV4.2': allYes({ 11: 'no', 13: 'no' }) } }, update: 'u' };
+  const { say, last, clock } = await registered({ fact });
+  clock.now = at(11);
+  await say('/schedule');
+  assert.match(last().text, /<s>10:00–11:00 · 1 год<\/s>/);
+  assert.match(last().text, /👉 <b>12:00–13:00<\/b>/);
+  clock.now = at(12);
+  await say('/schedule');
+  assert.match(last().text, /🔴 <b>12:00–13:00<\/b> · 1 год · зараз/);
+});
+
+test('with today done, the pointer goes to tomorrow, and tomorrow is never struck through', async () => {
+  const fact = {
+    data: { [TODAY]: { 'GPV4.2': allYes({ 1: 'no' }) }, [TOMORROW]: { 'GPV4.2': allYes({ 1: 'no', 3: 'no' }) } },
+    update: 'u',
+  };
+  const { say, last } = await registered({ fact });
+  await say('/schedule');
+  assert.match(last().text, /Сьогодні[\s\S]*<s>00:00–01:00 · 1 год<\/s>[\s\S]*Завтра[\s\S]*👉 <b>00:00–01:00<\/b> · 1 год\n<b>02:00–03:00<\/b> · 1 год/);
+});
+
+test('a day with no outages just says how much light there is', async () => {
+  const fact = { data: { [TODAY]: { 'GPV4.2': allYes() } }, update: 'u' };
+  const { say, last } = await registered({ fact });
+  await say('/schedule');
+  assert.equal(last().text, '<b>Сьогодні, пт 06.11</b>\n💡 Світло 24 год');
+});
+
+test('each line of a house has its own pointer', async () => {
+  const { say, last, clock, addresses } = await followingBothLines();
+  clock.now = at(9);
+  addresses().splice(0, 1);
+  await say('/schedule');
+  assert.match(last().text, /Черга 4\.2\n🌑 Без світла 1 год:\n👉 <b>11:00–12:00<\/b>/);
+  assert.match(last().text, /Черга 3\.1\n🌑 Без світла 1 год:\n👉 <b>14:00–15:00<\/b>/);
+});
+
 test('every interval sits on its own line', async () => {
   const fact = { data: { [TODAY]: { 'GPV4.2': allYes({ 1: 'second', 2: 'no', 8: 'no', 12: 'first', 20: 'maybe' }) } }, update: 'u' };
   const { say, last } = await registered({ fact });
   await say('/schedule');
-  assert.ok(last().text.includes('🌑 3 год:\n<b>00:30–02:00</b>,\n<b>07:00–08:00</b>,\n<b>11:00–11:30</b>\n'));
-  assert.ok(last().text.includes('❔ 1 год:\n<b>19:00–20:00</b>\n'));
+  assert.ok(last().text.includes('🌑 Без світла 3 год:\n<s>00:30–02:00 · 1 год 30 хв</s>\n<s>07:00–08:00 · 1 год</s>\n👉 <b>11:00–11:30</b> · 30 хв\n'));
+  assert.ok(last().text.includes('❔ Можливо без світла 1 год:\n<b>19:00–20:00</b> · 1 год\n'));
 });
 
 test('with several addresses each message and picture names its address', async () => {
@@ -802,7 +856,7 @@ test('the schedule goes out as a picture with the text as its caption', async ()
   images.drawn.length = 0;
   await say('/schedule');
   assert.equal(last().photo.toString(), 'png');
-  assert.equal(last().text, '<b>Сьогодні, пт 06.11</b>\n🌑 1 год:\n<b>11:00–12:00</b>\n💡 23 год');
+  assert.equal(last().text, '<b>Сьогодні, пт 06.11</b>\n🌑 Без світла 1 год:\n👉 <b>11:00–12:00</b> · 1 год\n💡 Світло 23 год');
   assert.ok(last().extra.reply_markup.keyboard, 'the menu stays');
   const [schedule] = images.drawn;
   assert.equal(schedule.address, undefined, 'one address needs no naming');
@@ -830,7 +884,7 @@ test('if the picture cannot be drawn, the schedule still arrives as text', async
   images.failing = true;
   await say('/schedule');
   assert.equal(last().photo, undefined);
-  assert.match(last().text, /🌑 1 год:\n<b>11:00–12:00/);
+  assert.match(last().text, /🌑 Без світла 1 год:\n👉 <b>11:00–12:00/);
   assert.ok(last().extra.reply_markup.keyboard);
 });
 

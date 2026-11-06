@@ -1,6 +1,6 @@
 import { renderScheduleImage } from './chart.js';
 import {
-  dayKey, diffSnapshots, formatClock, formatDayLabel, formatDuration, outageStarts, snapshot, summarizeDay,
+  clockMinutes, dayKey, diffSnapshots, formatClock, formatDayLabel, formatDuration, outageStarts, snapshot, summarizeDay,
 } from './schedule.js';
 
 const BUTTON_SCHEDULE = '📅 Графік';
@@ -84,16 +84,30 @@ export function createApp({
     return lines;
   }
 
+  // Telegram has no text colours, so state is shown by marks: what has passed is struck through,
+  // what is still to come is bold, and what is happening now or comes next gets a mark in front.
+  function renderInterval(item, key, nextStart) {
+    const range = `${item.from}–${item.to}`;
+    const duration = formatDuration(clockMinutes(item.to) - clockMinutes(item.from));
+    if (key === dayKey(now())) {
+      const current = clockMinutes(formatClock(now()));
+      if (clockMinutes(item.to) <= current) return `<s>${range} · ${duration}</s>`;
+      if (clockMinutes(item.from) <= current) return `🔴 <b>${range}</b> · ${duration} · зараз`;
+    }
+    const isNext = nextStart !== undefined && dayKey(nextStart) === key && formatClock(nextStart) === item.from;
+    return `${isNext ? '👉 ' : ''}<b>${range}</b> · ${duration}`;
+  }
+
   function renderDay(title, address, key) {
-    const dayLines = linesOfDay(address, key);
-    const list = (items) => items.map((item) => `<b>${item.from}–${item.to}</b>`).join(',\n');
     const lines = [`<b>${title}</b>`];
-    for (const { groups, row } of dayLines) {
+    for (const { groups, row } of linesOfDay(address, key)) {
       const { totals, intervals } = summarizeDay(row);
+      const nextStart = outageStarts(store.fact, groups[0]).find((start) => start.at > now())?.at;
+      const list = (items) => items.map((item) => renderInterval(item, key, nextStart)).join('\n');
       if (address.groups.length > 1) lines.push(queueTitle(groups));
-      if (intervals.off.length) lines.push(`🌑 ${formatDuration(totals.off)}:\n${list(intervals.off)}`);
-      if (intervals.maybe.length) lines.push(`❔ ${formatDuration(totals.maybe)}:\n${list(intervals.maybe)}`);
-      lines.push(`💡 ${formatDuration(totals.on)}`);
+      if (intervals.off.length) lines.push(`🌑 Без світла ${formatDuration(totals.off)}:\n${list(intervals.off)}`);
+      if (intervals.maybe.length) lines.push(`❔ Можливо без світла ${formatDuration(totals.maybe)}:\n${list(intervals.maybe)}`);
+      lines.push(`💡 Світло ${formatDuration(totals.on)}`);
     }
     return lines.join('\n');
   }
