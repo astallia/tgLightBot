@@ -1,6 +1,6 @@
 import { renderScheduleImage } from './chart.js';
 import {
-  clockMinutes, dayKey, diffSnapshots, formatClock, formatDayLabel, formatDuration, outageStarts, snapshot, summarizeDay,
+  clockMinutes, dayKey, diffSnapshots, formatClock, formatDayLabel, formatDuration, outageStarts, scheduleAt, snapshot, summarizeDay,
 } from './schedule.js';
 
 const BUTTON_SCHEDULE = '📅 Графік';
@@ -527,6 +527,47 @@ export function createApp({
     return { ...result, days: [...result.days].sort((a, b) => Number(a) - Number(b)) };
   }
 
+  const outageRange = (start) => (start.openEnded
+    ? `з ${formatClock(start.at)} щонайменше до ${formatClock(start.until)}`
+    : `з ${formatClock(start.at)} до ${formatClock(start.until)}`);
+
+  // What the address knew about one line before this change, in the shape the schedule helpers read.
+  function factBeforeChange(address, group) {
+    const days = Object.entries(address.seen[group] ?? {})
+      .map(([key, row]) => [key, { [group]: JSON.parse(row) }]);
+    return { data: Object.fromEntries(days) };
+  }
+
+  // A change can leave no time for the usual warning: an outage may now be minutes away or already
+  // running. That gets said right away, and only about what the schedule did not hold before.
+  async function warnAboutSuddenOutages(chatId, address) {
+    for (const group of address.groups) {
+      const before = factBeforeChange(address, group);
+      const knownStarts = new Set(outageStarts(before, group).map((start) => start.at));
+      const wasOff = scheduleAt(before, group, now())?.state === 'off';
+      const lines = address.groups.length > 1 ? `, ${queueLabel([group])}` : '';
+      const place = `${escapeHtml(addressLabel(address))}${lines}`;
+
+      const starts = outageStarts(store.fact, group);
+      const running = scheduleAt(store.fact, group, now())?.state === 'off'
+        ? starts.filter((start) => start.at <= now()).at(-1)
+        : undefined;
+      if (running && !wasOff && !address.warned[`${group}:${running.at}`]) {
+        await send(chatId, `🔴 ${place}\nГрафік змінили: відключення вже йде, ${outageRange(running)}.`);
+        address.warned[`${group}:${running.at}`] = true;
+      }
+
+      for (const start of starts) {
+        const left = start.at - now();
+        const key = `${group}:${start.at}`;
+        if (left <= 0 || left > warnMinutes * 60000 || knownStarts.has(start.at) || address.warned[key]) continue;
+        const what = start.certain ? 'відключення світла' : 'можливе відключення світла';
+        await send(chatId, `⚠️ ${place}\nГрафік змінили! Через ${Math.ceil(left / 60000)} хв ${what}: ${outageRange(start)}.`);
+        address.warned[key] = true;
+      }
+    }
+  }
+
   async function notifyChanges() {
     for (const [chatId, user] of store.users()) {
       for (const address of user.addresses) {
@@ -534,6 +575,7 @@ export function createApp({
         if (changed || added) {
           const heading = changed ? '🔄 <b>Графік змінився</b>' : '🆕 <b>Опубліковано новий графік</b>';
           try {
+            await warnAboutSuddenOutages(chatId, address);
             await sendSchedule(chatId, address, heading, days);
           } catch (error) {
             log(`Не отправлено ${chatId}: ${error.message}`);

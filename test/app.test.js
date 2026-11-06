@@ -629,14 +629,163 @@ test('a failed send is retried on the next check', async () => {
   assert.match(sent[0].text, /Через 14 хв/);
 });
 
-test('a new outage that appears inside the window warns right away', async () => {
-  const { app, clock, site, last } = await registered();
+const planned = (row) => ({ data: { [TODAY]: { 'GPV4.2': row } }, update: 'before' });
+const moved = (site, row) => {
+  site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': row } }, update: 'after' };
+};
+
+test('a new outage that appears inside the window warns right away, ahead of the schedule', async () => {
+  const { app, clock, site, sent } = await registered();
   clock.now = at(14, 50);
-  site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no', 16: 'no' }) } }, update: '06.11.2026 14:49' };
+  moved(site, allYes({ 12: 'no', 16: 'no' }));
   await app.pollSite();
-  assert.match(last().text, /Графік змінився/);
+  assert.equal(sent.length, 2);
+  assert.match(sent[0].text, /Графік змінили! Через 10 хв відключення світла: з 15:00 до 16:00/);
+  assert.match(sent[1].text, /Графік змінився/);
   await app.checkWarnings();
-  assert.match(last().text, /Через 10 хв відключення світла: з 15:00 до 16:00/);
+  assert.equal(sent.length, 2, 'the usual warning does not repeat it');
+});
+
+test('moved from 18:00 to 17:30 and it is 17:20: a warning with the time left', async () => {
+  const { app, clock, site, sent } = await registered({ fact: planned(allYes({ 19: 'no' })) });
+  clock.now = at(17, 20);
+  moved(site, allYes({ 18: 'second', 19: 'no' }));
+  await app.pollSite();
+  assert.match(sent[0].text, /⚠️ с\. Білогородка, вул\. Садова, 12\nГрафік змінили! Через 10 хв відключення світла: з 17:30 до 19:00\./);
+  clock.now = at(17, 21);
+  await app.checkWarnings();
+  assert.equal(sent.length, 2);
+});
+
+test('moved from 18:00 to 17:30 and it is already 17:30: it says the outage is on', async () => {
+  const { app, clock, site, sent } = await registered({ fact: planned(allYes({ 19: 'no' })) });
+  clock.now = at(17, 30);
+  moved(site, allYes({ 18: 'second', 19: 'no' }));
+  await app.pollSite();
+  assert.match(sent[0].text, /🔴 с\. Білогородка, вул\. Садова, 12\nГрафік змінили: відключення вже йде, з 17:30 до 19:00\./);
+  assert.match(sent[1].text, /Графік змінився/);
+  await app.pollSite();
+  await app.checkWarnings();
+  assert.equal(sent.length, 2, 'said once');
+});
+
+test('noticed a few minutes after the new start, it still says the outage is on', async () => {
+  const { app, clock, site, sent } = await registered({ fact: planned(allYes({ 19: 'no' })) });
+  clock.now = at(17, 33);
+  moved(site, allYes({ 18: 'second', 19: 'no' }));
+  await app.pollSite();
+  assert.match(sent[0].text, /вже йде, з 17:30 до 19:00/);
+});
+
+test('an outage running past what is published says so', async () => {
+  const { app, clock, site, sent } = await registered({ fact: planned(allYes()) });
+  clock.now = at(23, 10);
+  moved(site, allYes({ 24: 'no' }));
+  await app.pollSite();
+  assert.match(sent[0].text, /вже йде, з 23:00 щонайменше до 00:00/);
+});
+
+test('a possible outage appearing soon is called possible', async () => {
+  const { app, clock, site, sent } = await registered({ fact: planned(allYes()) });
+  clock.now = at(14, 50);
+  moved(site, allYes({ 16: 'maybe' }));
+  await app.pollSite();
+  assert.match(sent[0].text, /Графік змінили! Через 10 хв можливе відключення світла: з 15:00 до 16:00/);
+});
+
+test('a change with nothing soon sends only the schedule, the usual warning comes later', async () => {
+  const { app, clock, site, sent } = await registered({ fact: planned(allYes({ 19: 'no' })) });
+  clock.now = at(10);
+  moved(site, allYes({ 18: 'second', 19: 'no' }));
+  await app.pollSite();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /Графік змінився/);
+  clock.now = at(17, 15);
+  await app.checkWarnings();
+  assert.match(sent[1].text, /^⚠️ [^\n]*\nЧерез 15 хв відключення світла: з 17:30 до 19:00/);
+});
+
+test('an outage already on the schedule gets the usual warning, not a sudden one', async () => {
+  const { app, clock, site, sent } = await registered({ fact: planned(allYes({ 19: 'no' })) });
+  clock.now = at(17, 50);
+  moved(site, allYes({ 19: 'no', 23: 'no' }));
+  await app.pollSite();
+  assert.equal(sent.length, 1, 'only the schedule');
+  await app.checkWarnings();
+  assert.match(sent[1].text, /Через 10 хв відключення світла: з 18:00 до 19:00/);
+  assert.doesNotMatch(sent[1].text, /Графік змінили/);
+});
+
+test('an outage made longer while it runs is not announced as starting', async () => {
+  const { app, clock, site, sent } = await registered({ fact: planned(allYes({ 19: 'no' })) });
+  clock.now = at(18, 30);
+  moved(site, allYes({ 19: 'no', 20: 'no' }));
+  await app.pollSite();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /Графік змінився/);
+});
+
+test('an outage pushed later gives no alarm', async () => {
+  const { app, clock, site, sent } = await registered({ fact: planned(allYes({ 19: 'no' })) });
+  clock.now = at(17, 50);
+  moved(site, allYes({ 20: 'no' }));
+  await app.pollSite();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /Графік змінився/);
+});
+
+test('a site update that does not touch this queue stays silent during its outage', async () => {
+  const fact = { data: { [TODAY]: { 'GPV4.2': allYes({ 19: 'no' }), 'GPV3.1': allYes() } }, update: 'before' };
+  const { app, clock, site, sent } = await registered({ fact });
+  clock.now = at(18, 30);
+  site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': allYes({ 19: 'no' }), 'GPV3.1': allYes({ 5: 'no' }) } }, update: 'after' };
+  await app.pollSite();
+  assert.equal(sent.length, 0);
+});
+
+test('a restart during an outage announces nothing', async () => {
+  const ctx = await registered({ fact: planned(allYes({ 19: 'no' })) });
+  ctx.clock.now = at(18, 30);
+  await ctx.make(createStore(ctx.path)).pollSite();
+  assert.equal(ctx.sent.length, 0);
+});
+
+test('a lost alert is sent again and the schedule still arrives, with no doubles', async () => {
+  const { app, clock, site, sent, telegram } = await registered({ fact: planned(allYes({ 19: 'no' })) });
+  clock.now = at(17, 30);
+  moved(site, allYes({ 18: 'second', 19: 'no' }));
+  telegram.failing = true;
+  await app.pollSite();
+  telegram.failing = false;
+  await app.pollSite();
+  assert.equal(sent.length, 2);
+  assert.match(sent[0].text, /вже йде/);
+  assert.match(sent[1].text, /Графік змінився/);
+});
+
+test('if only the picture fails, the alert is not repeated when it is retried', async () => {
+  const { app, clock, site, sent, telegram } = await registered({ fact: planned(allYes({ 19: 'no' })) });
+  clock.now = at(17, 30);
+  moved(site, allYes({ 18: 'second', 19: 'no' }));
+  const original = telegram.sendPhoto;
+  telegram.sendPhoto = async () => { throw new Error('telegram hiccup'); };
+  await app.pollSite();
+  telegram.sendPhoto = original;
+  await app.pollSite();
+  assert.equal(sent.filter((message) => /вже йде/.test(message.text)).length, 1);
+  assert.equal(sent.filter((message) => /Графік змінився/.test(message.text)).length, 1);
+});
+
+test('a house followed on two lines names the line in the alert', async () => {
+  const { app, clock, site, sent } = await followingBothLines();
+  clock.now = at(13, 50);
+  site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no' }), 'GPV3.1': allYes({ 15: 'no', 16: 'no' }) } }, update: 'after' };
+  await app.pollSite();
+  assert.equal(sent.filter((message) => /Графік змінили/.test(message.text)).length, 0, 'the same start is not sudden');
+  sent.length = 0;
+  site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no' }), 'GPV3.1': allYes({ 14: 'no', 15: 'no', 16: 'no' }) } }, update: 'later' };
+  await app.pollSite();
+  assert.match(sent[0].text, /вул\. Шляхова, 20, черга 3\.1\nГрафік змінили: відключення вже йде, з 13:00 до 16:00/);
 });
 
 test('schedule change reaches the user once, an unrelated update does not', async () => {
