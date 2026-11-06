@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createApp } from './app.js';
 import { createDtekClient } from './dtek.js';
@@ -24,10 +25,12 @@ if (!/^[A-Za-z0-9_-]{1,64}$/.test(ACCESS_CODE ?? '')) {
 
 const hosted = Boolean(DATABASE_URL || PUBLIC_URL || RENDER_EXTERNAL_HOSTNAME);
 if (hosted && !DATABASE_URL) throw new Error('Для хостинга задайте DATABASE_URL от Neon');
-if (hosted && !/^[A-Za-z0-9_-]{16,256}$/.test(WEBHOOK_SECRET ?? '')) {
-  throw new Error('WEBHOOK_SECRET должен содержать 16–256 символов: латиница, цифры, _ и -');
-}
+if (hosted && !WEBHOOK_SECRET) throw new Error('Для хостинга задайте WEBHOOK_SECRET');
 if (hosted && !CRON_SECRET) throw new Error('Для хостинга задайте CRON_SECRET');
+
+const webhookSecret = WEBHOOK_SECRET && /^[A-Za-z0-9_-]{16,256}$/.test(WEBHOOK_SECRET)
+  ? WEBHOOK_SECRET
+  : WEBHOOK_SECRET && createHash('sha256').update(WEBHOOK_SECRET).digest('base64url');
 
 const publicUrl = (PUBLIC_URL || (RENDER_EXTERNAL_HOSTNAME && `https://${RENDER_EXTERNAL_HOSTNAME}`))?.replace(/\/$/, '');
 if (hosted && !publicUrl) throw new Error('Не удалось определить публичный URL; задайте PUBLIC_URL');
@@ -105,7 +108,7 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (request.method === 'POST' && url.pathname === '/telegram') {
-    if (request.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) {
+    if (request.headers['x-telegram-bot-api-secret-token'] !== webhookSecret) {
       json(response, 401, { ok: false });
       return;
     }
@@ -172,7 +175,7 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
       { command: 'add', description: 'Додати адресу' },
       { command: 'addresses', description: 'Мої адреси: графік і видалення' },
     ]);
-    if (hosted) await telegram.setWebhook(`${publicUrl}/telegram`, WEBHOOK_SECRET);
+    if (hosted) await telegram.setWebhook(`${publicUrl}/telegram`, webhookSecret);
     else await telegram.deleteWebhook();
     ready = true;
     console.log(`Бот @${me.username} запущен. Пригласительная ссылка: https://t.me/${me.username}?start=${ACCESS_CODE}`);
