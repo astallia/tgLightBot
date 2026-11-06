@@ -151,7 +151,7 @@ function setup({ fact } = {}) {
   const store = createStore(path);
   store.fact = fact ?? { data: { [TODAY]: { G: allYes({ 12: 'no', 13: 'no' }) } }, update: 'u' };
   const me = store.addUser(1);
-  me.addresses.push({ id: 1, city: 'с. А', street: 'вул. Б', house: '1', group: 'G', seen: {}, warned: {} });
+  me.addresses.push({ id: 1, city: 'с. А', street: 'вул. Б', house: '1', groups: ['G'], seen: {}, warned: {} });
   const friend = store.addUser(2);
   const make = (activeStore) => createPowerMonitor({
     xiaomi, store: activeStore, telegram, sensorModel: SENSOR, referenceModels: ROUTERS, ...LIMITS, now: () => clock.now, log: (line) => logged.push(line),
@@ -271,6 +271,18 @@ test('a possible next outage is called possible', async () => {
   ctx.me.powerAlerts = true;
   await goDark(ctx);
   assert.match(ctx.sent[0].text, /Наступне можливе відключення: 19:00–20:00\.$/);
+});
+
+test('a home on several lines hears about each of them', async () => {
+  const ctx = setup({ fact: { data: { [TODAY]: { G: allYes({ 11: 'no', 20: 'no' }), H: allYes({ 15: 'no' }) } }, update: 'u' } });
+  ctx.me.addresses[0].groups = ['G', 'H'];
+  ctx.me.powerAlerts = true;
+  await goDark(ctx);
+  const message = ctx.sent[0].text;
+  assert.match(message, /Черга G: За графіком зараз відключення, до 11:00/);
+  assert.match(message, /Черга H: За графіком світло зараз має бути/);
+  assert.match(message, /Черга G: Наступне відключення: 19:00–20:00/);
+  assert.match(message, /Черга H: Наступне відключення: 14:00–15:00/);
 });
 
 test('someone with no address gets the alert without schedule lines', async () => {

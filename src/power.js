@@ -77,34 +77,44 @@ export function createPowerMonitor({
     for (const [chatId] of subscribers()) await tell(chatId, text);
   }
 
+  // The sensor's home is the first address. When it is on several lines, each line gets its own say.
+  const homeGroups = (user) => user.addresses[0]?.groups ?? [];
+  const lineLabel = (user, group) => (homeGroups(user).length > 1 ? `Черга ${group.replace('GPV', '')}: ` : '');
+
   function scheduleLine(user) {
-    const group = user.addresses[0]?.group;
-    const planned = group ? scheduleAt(store.fact, group, now()) : null;
-    if (!planned) return '';
-    if (planned.state === 'off') {
-      return `\nЗа графіком зараз відключення, ${planned.openEnded ? 'щонайменше ' : ''}до ${formatClock(planned.until)}.`;
-    }
-    if (planned.state === 'maybe') return '\nЗа графіком зараз можливе відключення.';
-    return '\nЗа графіком світло зараз має бути, тож це може бути аварійне відключення або збій шлюзу.';
+    return homeGroups(user).map((group) => {
+      const planned = scheduleAt(store.fact, group, now());
+      if (!planned) return '';
+      const prefix = `\n${lineLabel(user, group)}`;
+      if (planned.state === 'off') {
+        return `${prefix}За графіком зараз відключення, ${planned.openEnded ? 'щонайменше ' : ''}до ${formatClock(planned.until)}.`;
+      }
+      if (planned.state === 'maybe') return `${prefix}За графіком зараз можливе відключення.`;
+      return `${prefix}За графіком світло зараз має бути, тож це може бути аварійне відключення або збій шлюзу.`;
+    }).join('');
   }
 
   function nextOutageLine(user) {
-    const group = user.addresses[0]?.group;
-    if (!group) return '';
-    const next = outageStarts(store.fact, group).find((start) => start.at > now());
-    if (!next) return '\nНаступних відключень у графіку поки немає.';
-    const what = next.certain ? 'Наступне відключення' : 'Наступне можливе відключення';
-    const day = dayKey(next.at) === dayKey(now()) ? '' : 'завтра ';
-    const longer = next.openEnded ? ' або довше' : '';
-    return `\n${what}: ${day}${formatClock(next.at)}–${formatClock(next.until)}${longer}.`;
+    const groups = homeGroups(user);
+    if (!groups.length) return '';
+    const lines = groups.map((group) => {
+      const next = outageStarts(store.fact, group).find((start) => start.at > now());
+      if (!next) return null;
+      const what = next.certain ? 'Наступне відключення' : 'Наступне можливе відключення';
+      const day = dayKey(next.at) === dayKey(now()) ? '' : 'завтра ';
+      const longer = next.openEnded ? ' або довше' : '';
+      return `\n${lineLabel(user, group)}${what}: ${day}${formatClock(next.at)}–${formatClock(next.until)}${longer}.`;
+    }).filter(Boolean);
+    return lines.length ? lines.join('') : '\nНаступних відключень у графіку поки немає.';
   }
 
   // Light can come back earlier than planned, and then it may still go out again within that window.
   function earlyReturnLine(user) {
-    const group = user.addresses[0]?.group;
-    const planned = group ? scheduleAt(store.fact, group, now()) : null;
-    if (planned?.state !== 'off') return '';
-    return `\nЗа графіком відключення ще до ${formatClock(planned.until)}, тож світло може знову зникнути.`;
+    return homeGroups(user).map((group) => {
+      const planned = scheduleAt(store.fact, group, now());
+      if (planned?.state !== 'off') return '';
+      return `\n${lineLabel(user, group)}За графіком відключення ще до ${formatClock(planned.until)}, тож світло може знову зникнути.`;
+    }).join('');
   }
 
   async function report(event) {

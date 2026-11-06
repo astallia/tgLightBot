@@ -157,20 +157,254 @@ test('an invited user walks through city, street and house and gets the schedule
   const message = last().text;
   assert.match(message, /Адресу додано/);
   assert.match(message, /за 15 хв/);
-  assert.match(message, /с\. Білогородка, вул\. Садова, 12/);
-  assert.match(message, /черга 4\.2/);
+  assert.doesNotMatch(message, /Білогородка|черга/, 'one address needs no naming');
   assert.match(message, /11:00–12:00/);
   assert.match(message, /💡 23 год/);
-  assert.match(message, /🌑 1 год: 11:00–12:00/);
-  assert.match(message, /Завтра, сб 07\.11:<\/b> графіка ще немає/);
-  assert.match(message, /06\.11\.2026 08:00/);
-  assert.equal(addresses()[0].group, 'GPV4.2');
+  assert.match(message, /🌑 1 год:\n<b>11:00–12:00/);
+  assert.doesNotMatch(message, /Завтра/, 'a day with no schedule is not mentioned');
+  assert.doesNotMatch(message, /Оновлено/);
+  assert.deepEqual(addresses()[0].groups, ['GPV4.2']);
+});
+
+// A house on two lines, on the real shape the site uses. 4.2 is dark 11-12, 3.1 is dark 14-15.
+async function followingBothLines() {
+  const ctx = await registered();
+  await ctx.addAddress('Шляхова', '20');
+  await ctx.tap('group:2');
+  ctx.sent.length = 0;
+  ctx.images.drawn.length = 0;
+  return ctx;
+}
+
+test('a house on two lines offers each queue and an option for people who do not know', async () => {
+  const { addAddress, last } = await registered();
+  await addAddress('Шляхова', '20');
+  assert.match(last().text, /різних ліній, і ДТЕК не вказує, від якої ваша квартира/);
+  assert.deepEqual(last().extra.reply_markup.inline_keyboard.map((row) => row[0].text), [
+    'Черга 4.2', 'Черга 3.1', 'Не знаю, стежити за всіма',
+  ]);
+});
+
+test('following all lines keeps both queues and says so everywhere', async () => {
+  const { addresses, say, sent, last, images, addAddress, tap } = await registered();
+  await addAddress('Шляхова', '20');
+  await tap('group:2');
+  const address = addresses().at(-1);
+  assert.deepEqual(address.groups, ['GPV4.2', 'GPV3.1']);
+  assert.equal(address.allLines, true);
+  assert.match(last().text, /Адресу додано/);
+  assert.match(last().text, /черги 4\.2, 3\.1/);
+  assert.match(last().text, /Черга 4\.2\n🌑 1 год:\n<b>11:00–12:00/);
+  assert.match(last().text, /Черга 3\.1\n🌑 1 год:\n<b>14:00–15:00/);
+  await say('📍 Мої адреси');
+  assert.match(last().text, /вул\. Шляхова, 20, черги 4\.2, 3\.1/);
+  sent.length = 0;
+  images.drawn.length = 0;
+  await say('/schedule');
+  const drawn = images.drawn.at(-1);
+  assert.equal(drawn.queues, 'черги 4.2, 3.1');
+  assert.deepEqual(drawn.days[0].lines.map((line) => line.label), ['Черга 4.2', 'Черга 3.1']);
+});
+
+test('the same house can be followed by one line or by all, but not twice the same way', async () => {
+  const { addresses, addAddress, tap, last } = await followingBothLines();
+  await addAddress('Шляхова', '20');
+  await tap('group:0');
+  assert.equal(addresses().length, 3, 'one line is a different choice');
+  await addAddress('Шляхова', '20');
+  await tap('group:2');
+  assert.match(last().text, /вже відстежується/);
+  assert.equal(addresses().length, 3);
+});
+
+test('each line warns on its own time and says which one it is', async () => {
+  const { app, clock, sent, last } = await followingBothLines();
+  clock.now = at(10, 45);
+  await app.checkWarnings();
+  assert.equal(sent.filter((m) => /вул\. Шляхова, 20/.test(m.text)).length, 1);
+  assert.match(sent.find((m) => /вул\. Шляхова, 20/.test(m.text)).text, /вул\. Шляхова, 20, черга 4\.2\nЧерез 15 хв відключення світла: з 11:00 до 12:00/);
+  sent.length = 0;
+  clock.now = at(13, 45);
+  await app.checkWarnings();
+  assert.match(last().text, /вул\. Шляхова, 20, черга 3\.1\nЧерез 15 хв відключення світла: з 14:00 до 15:00/);
+  await app.checkWarnings();
+  assert.equal(sent.length, 1, 'no repeats');
+});
+
+test('lines going dark together share one warning, and it is not repeated', async () => {
+  const fact = { data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no' }), 'GPV3.1': allYes({ 12: 'no' }) } }, update: 'u' };
+  const ctx = await registered({ fact });
+  await ctx.addAddress('Шляхова', '20');
+  await ctx.tap('group:2');
+  ctx.sent.length = 0;
+  ctx.clock.now = at(10, 45);
+  await ctx.app.checkWarnings();
+  const warnings = ctx.sent.filter((m) => /вул\. Шляхова, 20/.test(m.text));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].text, /вул\. Шляхова, 20, черги 4\.2, 3\.1\n/);
+  ctx.clock.now = at(10, 50);
+  await ctx.app.checkWarnings();
+  assert.equal(ctx.sent.filter((m) => /вул\. Шляхова, 20/.test(m.text)).length, 1);
+});
+
+test('lines on the same schedule are shown as one', async () => {
+  const fact = { data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no' }), 'GPV3.1': allYes({ 12: 'no' }) } }, update: 'u' };
+  const ctx = await registered({ fact });
+  await ctx.addAddress('Шляхова', '20');
+  await ctx.tap('group:2');
+  assert.match(ctx.last().text, /Черги 4\.2, 3\.1\n🌑 1 год:\n<b>11:00–12:00/);
+  assert.deepEqual(ctx.images.drawn.at(-1).days[0].lines.map((line) => line.label), ['Черги 4.2, 3.1']);
+});
+
+test('a change on one of the lines is reported with the day that changed', async () => {
+  const { app, site, sent, last } = await followingBothLines();
+  site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no' }), 'GPV3.1': allYes({ 15: 'no', 16: 'no' }) } }, update: '06.11.2026 10:00' };
+  await app.pollSite();
+  const notices = sent.filter((m) => /вул\. Шляхова, 20/.test(m.text));
+  assert.equal(notices.length, 1);
+  assert.match(last().text, /Графік змінився/);
+  assert.match(notices[0].text, /14:00–16:00/);
+});
+
+test('a line missing from the published data is left out, the other still shows', async () => {
+  const fact = { data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no' }) } }, update: 'u' };
+  const ctx = await registered({ fact });
+  await ctx.addAddress('Шляхова', '20');
+  await ctx.tap('group:2');
+  assert.deepEqual(ctx.images.drawn.at(-1).days[0].lines.map((line) => line.label), ['Черга 4.2']);
+});
+
+test('the site adding or dropping lines updates an address that follows all of them', async () => {
+  const { addresses, say, site, sent } = await followingBothLines();
+  site.houses = { ...site.houses, 20: house('GPV4.2') };
+  await say('/schedule');
+  const address = addresses().at(-1);
+  assert.deepEqual(address.groups, ['GPV4.2']);
+  assert.equal(address.allLines, false);
+  assert.ok(sent.some((m) => /вул\. Шляхова, 20 змінилася: 4\.2, 3\.1 → 4\.2/.test(m.text)));
+});
+
+test('someone who chose a line keeps it while the site still lists it', async () => {
+  const { addAddress, tap, addresses, say, site } = await registered();
+  await addAddress('Шляхова', '20');
+  await tap('group:1');
+  site.houses = { ...site.houses, 20: house('GPV3.1', 'GPV5.1') };
+  await say('/schedule');
+  assert.deepEqual(addresses().at(-1).groups, ['GPV3.1']);
+});
+
+test('a chosen line the site no longer lists moves to all current lines', async () => {
+  const { addAddress, tap, addresses, say, site, sent } = await registered();
+  await addAddress('Шляхова', '20');
+  await tap('group:1');
+  site.houses = { ...site.houses, 20: house('GPV1.1', 'GPV5.1') };
+  await say('/schedule');
+  assert.deepEqual(addresses().at(-1).groups, ['GPV1.1', 'GPV5.1']);
+  assert.equal(addresses().at(-1).allLines, true);
+  assert.ok(sent.some((m) => /змінилася: 3\.1 → 1\.1, 5\.1/.test(m.text)));
+});
+
+test('an address newly on two lines says so and offers the choice', async () => {
+  const { app, addresses, site, sent, tap, last, images } = await registered();
+  site.houses = { ...site.houses, 12: house('GPV3.1', 'GPV5.1') };
+  await app.refreshAddresses();
+  const notice = sent[0];
+  assert.match(notice.text, /с\. Білогородка, вул\. Садова, 12 змінилася: 4\.2 → 3\.1, 5\.1\. Будинок підключений до різних ліній/);
+  assert.deepEqual(notice.extra.reply_markup.inline_keyboard.map((row) => row[0].text), [
+    'Черга 3.1', 'Черга 5.1', 'Не знаю, стежити за всіма',
+  ]);
+  assert.deepEqual(addresses()[0].groups, ['GPV3.1', 'GPV5.1']);
+  sent.length = 0;
+  images.drawn.length = 0;
+  const id = addresses()[0].id;
+  await tap(`line:${id}:0`);
+  assert.deepEqual(addresses()[0].groups, ['GPV3.1']);
+  assert.equal(addresses()[0].allLines, false);
+  assert.deepEqual(addresses()[0].lines, ['GPV3.1', 'GPV5.1']);
+  assert.match(last().text, /Збережено: черга 3\.1/);
+  assert.equal(images.drawn.at(-1).queues, 'черга 3.1');
+  sent.length = 0;
+  await app.refreshAddresses();
+  assert.equal(sent.length, 0, 'the choice stays and nothing is announced again');
+});
+
+test('a house gaining a line keeps the chosen queue but mentions the new one', async () => {
+  const { app, addresses, site, sent } = await registered();
+  site.houses = { ...site.houses, 12: house('GPV4.2', 'GPV5.1') };
+  await app.refreshAddresses();
+  assert.deepEqual(addresses()[0].groups, ['GPV4.2']);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /тепер черги 4\.2, 5\.1\. Ви стежите за чергою 4\.2/);
+  assert.equal(sent[0].extra.reply_markup.inline_keyboard.length, 3);
+  await app.refreshAddresses();
+  assert.equal(sent.length, 1);
+});
+
+test('losing the other line of a chosen queue passes quietly', async () => {
+  const { app, addAddress, tap, addresses, site, sent } = await registered();
+  await addAddress('Шляхова', '20');
+  await tap('group:0');
+  sent.length = 0;
+  site.houses = { ...site.houses, 20: house('GPV4.2') };
+  await app.refreshAddresses();
+  assert.deepEqual(addresses().at(-1).lines, ['GPV4.2']);
+  assert.equal(sent.length, 0);
+});
+
+test('the address list offers to change the line only for a house with several', async () => {
+  const { addAddress, tap, say, last, addresses, sent } = await registered();
+  await addAddress('Шляхова', '20');
+  await tap('group:2');
+  await say('📍 Мої адреси');
+  const buttons = last().extra.reply_markup.inline_keyboard.flat().map((button) => button.text);
+  assert.deepEqual(buttons, ['📅 Графік 1', '🗑 Видалити 1', '📅 Графік 2', '🗑 Видалити 2', '🔀 Змінити чергу 2']);
+  const id = addresses()[1].id;
+  await tap(`choose:${id}`);
+  assert.match(last().text, /Оберіть чергу для адреси с\. Гатне, вул\. Шляхова, 20/);
+  await tap(`line:${id}:1`);
+  assert.deepEqual(addresses()[1].groups, ['GPV3.1']);
+  await tap(`line:${id}:all`);
+  assert.deepEqual(addresses()[1].groups, ['GPV4.2', 'GPV3.1']);
+  assert.equal(addresses()[1].allLines, true);
+  sent.length = 0;
+  await tap(`line:${id}:9`);
+  assert.match(last().text, /застарів/);
+  assert.deepEqual(addresses()[1].groups, ['GPV4.2', 'GPV3.1']);
+});
+
+test('choosing a line does not report that line as a schedule change', async () => {
+  const { addAddress, tap, addresses, app, sent } = await registered();
+  await addAddress('Шляхова', '20');
+  await tap('group:0');
+  await tap(`line:${addresses()[1].id}:1`);
+  sent.length = 0;
+  await app.pollSite();
+  assert.equal(sent.length, 0);
+});
+
+test('a site update checks the addresses straight away', async () => {
+  const { app, addresses, site, sent } = await registered();
+  site.houses = { ...site.houses, 12: house('GPV3.1') };
+  site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no' }), 'GPV3.1': allYes({ 15: 'no' }) } }, update: '06.11.2026 10:00' };
+  await app.pollSite();
+  assert.deepEqual(addresses()[0].groups, ['GPV3.1']);
+  assert.match(sent[0].text, /змінилася: 4\.2 → 3\.1/);
+  assert.match(sent[1].text, /Графік змінився[\s\S]*14:00–15:00/);
+});
+
+test('a poll with no site update does not look addresses up', async () => {
+  const { app, site } = await registered();
+  let lookups = 0;
+  const original = site.lookupHouses;
+  site.lookupHouses = async () => { lookups++; return original(); };
+  await app.pollSite();
+  assert.equal(lookups, 0);
 });
 
 test('a second address is added next to the first, not instead of it', async () => {
   const { addAddress, addresses, last } = await registered();
   await addAddress('Шляхова', '40');
-  assert.deepEqual(addresses().map((address) => [address.city, address.house, address.group]), [
+  assert.deepEqual(addresses().map((address) => [address.city, address.house, address.groups[0]]), [
     ['с. Білогородка', '12', 'GPV4.2'],
     ['с. Гатне', '40', 'GPV3.1'],
   ]);
@@ -189,7 +423,7 @@ test('the same address is not added twice, but another queue of the same house i
   await tap('group:0');
   await addAddress('Шляхова', '20');
   await tap('group:1');
-  assert.deepEqual(addresses().filter((address) => address.house === '20').map((address) => address.group), ['GPV4.2', 'GPV3.1']);
+  assert.deepEqual(addresses().filter((address) => address.house === '20').map((address) => address.groups), [['GPV4.2'], ['GPV3.1']]);
   await addAddress('Шляхова', '20');
   await tap('group:1');
   assert.match(last().text, /вже відстежується/);
@@ -305,21 +539,21 @@ test('a house in two queues asks which one, a house with no queue is refused', a
   await say('текст замість кнопки');
   assert.match(last().text, /кнопкою/);
   await tap('group:1');
-  assert.equal(addresses()[0].group, 'GPV3.1');
+  assert.deepEqual(addresses()[0].groups, ['GPV3.1']);
 });
 
 test('an old dialog button does not change anything', async () => {
   const { tap, last, addresses } = await registered();
   await tap('group:1');
   assert.match(last().text, /застарів/);
-  assert.equal(addresses()[0].group, 'GPV4.2');
+  assert.deepEqual(addresses()[0].groups, ['GPV4.2']);
 });
 
 test('a button still works when Telegram refuses to acknowledge it', async () => {
   const { tap, last, telegram, addresses } = await registered();
   telegram.answerFailing = true;
   await tap(`show:${addresses()[0].id}`);
-  assert.match(last().text, /вул\. Садова, 12/);
+  assert.match(last().text, /🌑 1 год/);
 });
 
 test('a city without streets skips straight to the result', async () => {
@@ -329,8 +563,7 @@ test('a city without streets skips straight to the result', async () => {
   await say('/start secret');
   await say('Без Вулиць');
   assert.match(last().text, /Адресу додано/);
-  assert.match(last().text, /с\. Без Вулиць · черга 3\.1/);
-  assert.equal(addresses()[0].group, 'GPV3.1');
+  assert.deepEqual(addresses()[0].groups, ['GPV3.1']);
 });
 
 test('the warning comes 15 minutes before, exactly once, with the right times', async () => {
@@ -416,8 +649,7 @@ test('schedule change reaches the user once, an unrelated update does not', asyn
   assert.equal(sent.length, 1);
   assert.match(last().text, /Графік змінився/);
   assert.match(last().text, /11:00–12:30/);
-  assert.match(last().text, /🌑 1 год 30 хв: 11:00–12:30/);
-  assert.match(last().text, /06\.11\.2026 10:30/);
+  assert.match(last().text, /🌑 1 год 30 хв:\n<b>11:00–12:30/);
   await app.pollSite();
   assert.equal(sent.length, 1);
 });
@@ -490,7 +722,79 @@ test('a withdrawn schedule says so instead of showing nothing', async () => {
   const { app, site, last } = await registered();
   site.pendingUpdate = { data: {}, update: '06.11.2026 10:00' };
   await app.pollSite();
-  assert.match(last().text, /Графік змінився[\s\S]*Сьогодні, пт 06\.11:<\/b> графіка ще немає/);
+  assert.match(last().text, /Графік змінився[\s\S]*Графіка поки немає\./);
+  assert.equal(last().photo, undefined, 'nothing to draw');
+});
+
+test('one withdrawn day shows what is still published, not that there is nothing', async () => {
+  const fact = { data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no' }) }, [TOMORROW]: { 'GPV4.2': allYes({ 5: 'no' }) } }, update: 'u' };
+  const { app, site, last } = await registered({ fact });
+  site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': allYes({ 12: 'no' }) } }, update: 'u2' };
+  await app.pollSite();
+  assert.match(last().text, /Графік змінився[\s\S]*Сьогодні, пт 06\.11[\s\S]*11:00–12:00/);
+  assert.doesNotMatch(last().text, /Графіка поки немає/);
+});
+
+test('tomorrow appears once it is published, without a marker for the current time', async () => {
+  const fact = { data: { [TODAY]: { 'GPV4.2': allYes() }, [TOMORROW]: { 'GPV4.2': allYes({ 5: 'no' }) } }, update: 'u' };
+  const { say, last, images } = await registered({ fact });
+  images.drawn.length = 0;
+  await say('/schedule');
+  assert.match(last().text, /Завтра, сб 07\.11/);
+  const { days } = images.drawn.at(-1);
+  assert.deepEqual(days.map((day) => day.title), ['Сьогодні, пт 06.11', 'Завтра, сб 07.11']);
+  assert.equal(days[0].nowMinutes, 9 * 60);
+  assert.equal(days[1].nowMinutes, undefined);
+});
+
+test('only tomorrow published shows only tomorrow', async () => {
+  const fact = { data: { [TOMORROW]: { 'GPV4.2': allYes({ 5: 'no' }) } }, update: 'u' };
+  const { say, last, images } = await registered({ fact });
+  images.drawn.length = 0;
+  await say('/schedule');
+  assert.doesNotMatch(last().text, /Сьогодні/);
+  assert.deepEqual(images.drawn.at(-1).days.map((day) => day.title), ['Завтра, сб 07.11']);
+});
+
+test('no schedule at all gets a short answer in text, not an empty picture', async () => {
+  const { say, last, images } = await registered({ fact: { data: {}, update: 'u' } });
+  images.drawn.length = 0;
+  await say('/schedule');
+  assert.match(last().text, /Графіка поки немає\./);
+  assert.equal(last().photo, undefined);
+  assert.equal(images.drawn.length, 0);
+});
+
+test('every interval sits on its own line', async () => {
+  const fact = { data: { [TODAY]: { 'GPV4.2': allYes({ 1: 'second', 2: 'no', 8: 'no', 12: 'first', 20: 'maybe' }) } }, update: 'u' };
+  const { say, last } = await registered({ fact });
+  await say('/schedule');
+  assert.ok(last().text.includes('🌑 3 год:\n<b>00:30–02:00</b>,\n<b>07:00–08:00</b>,\n<b>11:00–11:30</b>\n'));
+  assert.ok(last().text.includes('❔ 1 год:\n<b>19:00–20:00</b>\n'));
+});
+
+test('with several addresses each message and picture names its address', async () => {
+  const { say, sent, images } = await registeredWithTwo();
+  images.drawn.length = 0;
+  await say('/schedule');
+  assert.match(sent[0].text, /^📍 с\. Білогородка, вул\. Садова, 12 · черга 4\.2\n\n/);
+  assert.match(sent[1].text, /^📍 с\. Гатне, вул\. Шляхова, 40 · черга 3\.1\n\n/);
+  assert.equal(images.drawn[0].address, 'с. Білогородка, вул. Садова, 12');
+  assert.equal(images.drawn[1].address, 'с. Гатне, вул. Шляхова, 40');
+});
+
+test('an outage in progress and a change notice stay in the message', async () => {
+  const { say, app, last, site } = await registered();
+  site.houses = {
+    12: {
+      sub_type: 'Аварійні ремонтні роботи', start_date: 'a', end_date: 'b', type: '2', sub_type_reason: ['GPV4.2'],
+    },
+  };
+  await say('/schedule');
+  assert.match(last().text, /^⚠️ <b>Зараз за адресою немає світла<\/b>/);
+  site.pendingUpdate = { data: { [TODAY]: { 'GPV4.2': allYes({ 15: 'no' }) } }, update: 'u2' };
+  await app.pollSite();
+  assert.match(last().text, /^🔄 <b>Графік змінився<\/b>/);
 });
 
 test('the schedule goes out as a picture with the text as its caption', async () => {
@@ -498,18 +802,15 @@ test('the schedule goes out as a picture with the text as its caption', async ()
   images.drawn.length = 0;
   await say('/schedule');
   assert.equal(last().photo.toString(), 'png');
-  assert.match(last().text, /с\. Білогородка, вул\. Садова, 12 · черга 4\.2/);
-  assert.match(last().text, /🌑 1 год: 11:00–12:00/);
+  assert.equal(last().text, '<b>Сьогодні, пт 06.11</b>\n🌑 1 год:\n<b>11:00–12:00</b>\n💡 23 год');
   assert.ok(last().extra.reply_markup.keyboard, 'the menu stays');
   const [schedule] = images.drawn;
-  assert.equal(schedule.address, 'с. Білогородка, вул. Садова, 12');
-  assert.equal(schedule.group, '4.2');
-  assert.equal(schedule.update, '06.11.2026 08:00');
-  assert.deepEqual(schedule.days.map((day) => day.title), ['Сьогодні, пт 06.11', 'Завтра, сб 07.11']);
-  assert.equal(schedule.days[0].row[12], 'no');
+  assert.equal(schedule.address, undefined, 'one address needs no naming');
+  assert.equal(schedule.queues, 'черга 4.2');
+  assert.deepEqual(schedule.days.map((day) => day.title), ['Сьогодні, пт 06.11'], 'tomorrow has no schedule yet');
+  assert.equal(schedule.days[0].lines[0].row[12], 'no');
+  assert.equal(schedule.days[0].lines[0].label, undefined);
   assert.equal(schedule.days[0].nowMinutes, 9 * 60, 'the marker is on today');
-  assert.equal(schedule.days[1].nowMinutes, undefined);
-  assert.equal(schedule.days[1].row, undefined);
 });
 
 test('a new address and a schedule change come as pictures too', async () => {
@@ -529,7 +830,7 @@ test('if the picture cannot be drawn, the schedule still arrives as text', async
   images.failing = true;
   await say('/schedule');
   assert.equal(last().photo, undefined);
-  assert.match(last().text, /🌑 1 год: 11:00–12:00/);
+  assert.match(last().text, /🌑 1 год:\n<b>11:00–12:00/);
   assert.ok(last().extra.reply_markup.keyboard);
 });
 
@@ -591,16 +892,16 @@ test('a reassigned queue follows the address and names it', async () => {
   const { say, sent, site, addresses } = await registered();
   site.houses = { 12: house('GPV3.1') };
   await say('/schedule');
-  assert.equal(addresses()[0].group, 'GPV3.1');
+  assert.deepEqual(addresses()[0].groups, ['GPV3.1']);
   assert.match(sent[0].text, /с\. Білогородка, вул\. Садова, 12 змінилася: 4\.2 → 3\.1/);
-  assert.match(sent[1].text, /черга 3\.1/);
+  assert.match(sent[1].text, /14:00–15:00/);
 });
 
 test('the periodic address check also catches a reassigned queue', async () => {
   const { app, sent, site, addresses } = await registered();
   site.houses = { 12: house('GPV3.1') };
   await app.refreshAddresses();
-  assert.equal(addresses()[0].group, 'GPV3.1');
+  assert.deepEqual(addresses()[0].groups, ['GPV3.1']);
   assert.match(sent[0].text, /змінилася: 4\.2 → 3\.1/);
   assert.match(sent[1].text, /Графік змінився[\s\S]*14:00–15:00/);
 });

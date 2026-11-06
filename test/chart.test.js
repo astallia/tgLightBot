@@ -10,8 +10,12 @@ const allYes = (overrides = {}) => {
 const ON = '#FFD23F';
 const OFF = '#2A2E45';
 
-const card = (day, extra = {}) => ({
-  address: 'с. Гатне, вул. Шляхова, 4', group: '3.2', update: '06.11.2026 15:09', days: [{ title: 'Сьогодні', ...day }], ...extra,
+const card = ({ row, nowMinutes }, extra = {}) => ({
+  address: 'с. Гатне, вул. Шляхова, 4',
+  queues: 'черга 3.2',
+  update: '06.11.2026 15:09',
+  days: [{ title: 'Сьогодні', lines: row ? [{ row }] : [], nowMinutes }],
+  ...extra,
 });
 
 function tileFills(svg, hour) {
@@ -69,12 +73,11 @@ test('the marker stays inside the picture at both ends of the day', () => {
   }
 });
 
-test('a day with no schedule says so, and several days are drawn in order', () => {
+test('several days are drawn in order', () => {
   const svg = buildScheduleSvg({
-    address: 'а', group: '1.1', update: 'u', days: [{ title: 'Сьогодні', row: allYes() }, { title: 'Завтра' }],
+    address: 'а', queues: 'черга 1.1', update: 'u', days: [{ title: 'Сьогодні', lines: [{ row: allYes() }] }, { title: 'Завтра', lines: [{ row: allYes() }] }],
   });
   assert.ok(svg.indexOf('Сьогодні') < svg.indexOf('Завтра'));
-  assert.match(svg, /Графіка ще немає/);
 });
 
 test('names from the site cannot break the picture', () => {
@@ -85,5 +88,38 @@ test('names from the site cannot break the picture', () => {
 
 test('a very long address is shortened to stay on the picture', () => {
   const svg = buildScheduleSvg(card({ row: allYes() }, { address: 'д'.repeat(100) }));
-  assert.match(svg, /д{47}… · черга 3\.2/);
+  assert.match(svg, /д{43}… · черга 3\.2/);
+});
+
+test('a house on two lines shows each one, named, and still renders', () => {
+  const schedule = {
+    address: 'м. Переяслав, вул. Шкільна, 44',
+    queues: 'черги 6.2, 4.1',
+    update: 'u',
+    days: [{
+      title: 'Сьогодні',
+      nowMinutes: 600,
+      lines: [{ label: 'Черга 6.2', row: allYes({ 1: 'no' }) }, { label: 'Черга 4.1', row: allYes({ 2: 'first' }) }],
+    }],
+  };
+  const svg = buildScheduleSvg(schedule);
+  assert.match(svg, /черги 6\.2, 4\.1/);
+  assert.ok(svg.indexOf('Черга 6.2') < svg.indexOf('Черга 4.1'));
+  assert.equal((svg.match(/data-hour="0"/g) ?? []).length, 2, 'two lines, two drawings of each hour');
+  assert.equal((svg.match(/data-now=/g) ?? []).length, 2, 'the marker is on both lines');
+  const ids = [...svg.matchAll(/clipPath id="([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(new Set(ids).size, ids.length, 'clip ids do not collide between lines');
+  assert.ok(renderScheduleImage(schedule).length > 5000);
+});
+
+test('without an address the card holds only the days', () => {
+  const svg = buildScheduleSvg({ queues: 'черга 3.2', days: [{ title: 'Сьогодні', lines: [{ row: allYes() }] }] });
+  assert.doesNotMatch(svg, /черга 3\.2/);
+  assert.doesNotMatch(svg, /Оновлено/);
+  assert.match(svg, />Сьогодні</);
+  assert.ok(renderScheduleImage({ queues: 'черга 3.2', days: [{ title: 'Сьогодні', lines: [{ row: allYes() }] }] }).length > 5000);
+});
+
+test('one line needs no name', () => {
+  assert.doesNotMatch(buildScheduleSvg(card({ row: allYes() })), /Черга/);
 });

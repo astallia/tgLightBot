@@ -7,7 +7,7 @@ import { createTelegram } from './telegram.js';
 import { createXiaomiClient, loadSession } from './xiaomi.js';
 
 const WARNING_CHECK_MS = 20000;
-const ADDRESS_REFRESH_MS = 6 * 60 * 60000;
+const ADDRESS_REFRESH_MS = 60 * 60000;
 
 const {
   BOT_TOKEN, ACCESS_CODE, POLL_SECONDS = '120', WARN_MINUTES = '15', DATA_FILE = 'data/state.json',
@@ -102,5 +102,5 @@ await app.pollSite();
 repeat('Проверка сайта', Number(POLL_SECONDS) * 1000, app.pollSite);
 repeat('Предупреждения', WARNING_CHECK_MS, app.checkWarnings);
 if (power) repeat('Датчик света', Number(POWER_POLL_SECONDS) * 1000, power.poll);
-setTimeout(() => repeat('Проверка адресов', ADDRESS_REFRESH_MS, app.refreshAddresses), ADDRESS_REFRESH_MS);
+repeat('Проверка адресов', ADDRESS_REFRESH_MS, app.refreshAddresses);
 receiveUpdates();

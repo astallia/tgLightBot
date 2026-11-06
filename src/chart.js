@@ -21,7 +21,7 @@ const TILE_HEIGHT = 84;
 const RADIUS = 14;
 const MARKER_SPACE = 44;
 const LABEL_SPACE = 36;
-const MAX_ADDRESS_LENGTH = 48;
+const MAX_ADDRESS_LENGTH = 44;
 
 const escapeXml = (text) => String(text)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -79,30 +79,26 @@ function renderLegendItem(x, y, fill, label, value) {
   ].join('');
 }
 
-// Returns the drawing of one day and the height it takes.
-function renderDay(day, top, index) {
-  if (!day.row) {
-    return {
-      height: 112,
-      svg: [
-        text(MARGIN, top + 44, day.title, { size: 42, weight: 700 }),
-        text(MARGIN, top + 90, 'Графіка ще немає', { size: 32, color: COLORS.muted }),
-      ].join(''),
-    };
+// One line of the house: its name when there are several, two rows of hours and the totals.
+function renderLine(line, nowMinutes, top, clipPrefix) {
+  const parts = [];
+  let cursor = top;
+  if (line.label) {
+    parts.push(text(MARGIN, cursor + 36, line.label, { size: 34, weight: 700 }));
+    cursor += 48;
   }
-  const states = rowStates(day.row);
-  const { totals } = summarizeDay(day.row);
-  const firstRow = top + 62 + MARKER_SPACE;
+  const states = rowStates(line.row);
+  const { totals } = summarizeDay(line.row);
+  const firstRow = cursor + MARKER_SPACE;
   const secondRow = firstRow + TILE_HEIGHT + LABEL_SPACE + MARKER_SPACE;
   const legendY = secondRow + TILE_HEIGHT + LABEL_SPACE + 58;
-  const parts = [
-    text(MARGIN, top + 44, day.title, { size: 42, weight: 700 }),
-    renderHours(states, 0, firstRow, `d${index}a`),
-    renderHours(states, 12, secondRow, `d${index}b`),
-    day.nowMinutes === undefined ? '' : renderNowMarker(day.nowMinutes, [firstRow, secondRow]),
+  parts.push(
+    renderHours(states, 0, firstRow, `${clipPrefix}a`),
+    renderHours(states, 12, secondRow, `${clipPrefix}b`),
+    nowMinutes === undefined ? '' : renderNowMarker(nowMinutes, [firstRow, secondRow]),
     renderLegendItem(MARGIN, legendY, COLORS.on, 'Світло', formatDuration(totals.on)),
     renderLegendItem(WIDTH / 2 - 20, legendY, COLORS.off, 'Без світла', formatDuration(totals.off)),
-  ];
+  );
   let height = legendY + 18 - top;
   if (totals.maybe) {
     parts.push(renderLegendItem(MARGIN, legendY + 54, FILLS.maybe, 'Можливо без світла', formatDuration(totals.maybe)));
@@ -111,12 +107,29 @@ function renderDay(day, top, index) {
   return { height, svg: parts.join('') };
 }
 
-// days: [{ title, row, nowMinutes }]. row is missing when no schedule is published;
-// nowMinutes, minutes since midnight, is set only for today.
-export function buildScheduleSvg({ address, group, days, update }) {
-  const label = address.length > MAX_ADDRESS_LENGTH ? `${address.slice(0, MAX_ADDRESS_LENGTH - 1)}…` : address;
-  const parts = [text(MARGIN, 66, `${label} · черга ${group}`, { size: 30, color: COLORS.muted })];
-  let top = 98;
+// Returns the drawing of one day and the height it takes.
+function renderDay(day, top, index) {
+  const parts = [text(MARGIN, top + 44, day.title, { size: 42, weight: 700 })];
+  let cursor = top + 62;
+  day.lines.forEach((line, lineIndex) => {
+    const drawn = renderLine(line, day.nowMinutes, cursor, `d${index}l${lineIndex}`);
+    parts.push(drawn.svg);
+    cursor += drawn.height + 22;
+  });
+  return { height: cursor - 22 - top, svg: parts.join('') };
+}
+
+// days: [{ title, lines: [{ label, row }], nowMinutes }]. label is set only when the house has
+// several lines; nowMinutes, minutes since midnight, is set only for today.
+// address is given only when it is needed to tell addresses apart.
+export function buildScheduleSvg({ address, queues, days }) {
+  const parts = [];
+  let top = 24;
+  if (address) {
+    const label = address.length > MAX_ADDRESS_LENGTH ? `${address.slice(0, MAX_ADDRESS_LENGTH - 1)}…` : address;
+    parts.push(text(MARGIN, 66, `${label} · ${queues}`, { size: 30, color: COLORS.muted }));
+    top = 98;
+  }
   days.forEach((day, index) => {
     if (index > 0) {
       parts.push(`<rect x="${MARGIN}" y="${top}" width="${WIDTH - 2 * MARGIN}" height="2" fill="${COLORS.line}"/>`);
@@ -126,8 +139,7 @@ export function buildScheduleSvg({ address, group, days, update }) {
     parts.push(drawn.svg);
     top += drawn.height + 28;
   });
-  parts.push(text(MARGIN, top + 28, `Оновлено на сайті: ${update || 'немає даних'}`, { size: 26, color: COLORS.muted }));
-  const height = top + 60;
+  const height = top + 4;
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}">`,
     '<defs><pattern id="maybe" width="16" height="16" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">',

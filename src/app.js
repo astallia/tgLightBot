@@ -15,6 +15,7 @@ const MENU = {
 const MAX_OPTIONS = 10;
 const MAX_ADDRESSES = 10;
 const MAX_CAPTION_LENGTH = 1024;
+const ALL_LINES = '*';
 const FULL_RELOAD_MS = 30 * 60000;
 const SITE_ALERT_AFTER_MS = 30 * 60000;
 const DAY_MS = 24 * 60 * 60000;
@@ -22,6 +23,8 @@ const EMERGENCY_PREFIX = 'Екстренні відключення';
 
 const escapeHtml = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const groupLabel = (group) => group.replace('GPV', '');
+const queueLabel = (groups) => `${groups.length > 1 ? 'черги' : 'черга'} ${groups.map(groupLabel).join(', ')}`;
+const queueTitle = (groups) => `${groups.length > 1 ? 'Черги' : 'Черга'} ${groups.map(groupLabel).join(', ')}`;
 const addressLabel = ({ city, street, house }) => [city, street, house === '-' ? '' : house].filter(Boolean).join(', ');
 
 // People type from Russian and Ukrainian keyboards, so letters that differ between them are folded together.
@@ -59,6 +62,7 @@ export function createApp({
   let siteAlertSent = false;
 
   const send = (chatId, text, extra = MENU) => telegram.sendMessage(chatId, text, extra);
+  const snapshotsOf = (groups) => Object.fromEntries(groups.map((group) => [group, snapshot(store.fact, group)]));
 
   async function broadcast(text) {
     for (const [chatId] of store.users()) {
@@ -66,14 +70,31 @@ export function createApp({
     }
   }
 
-  function renderDay(title, row) {
-    if (!row) return `<b>${title}:</b> графіка ще немає`;
-    const { totals, intervals } = summarizeDay(row);
-    const list = (items) => items.map((item) => `${item.from}–${item.to}`).join(', ');
+  // The published rows of a day, one per line of the house. Lines on the same schedule share a row.
+  function linesOfDay(address, key) {
+    const lines = [];
+    for (const group of address.groups) {
+      const row = store.fact?.data?.[key]?.[group];
+      if (!row) continue;
+      const fingerprint = JSON.stringify(row);
+      const same = lines.find((line) => line.fingerprint === fingerprint);
+      if (same) same.groups.push(group);
+      else lines.push({ groups: [group], row, fingerprint });
+    }
+    return lines;
+  }
+
+  function renderDay(title, address, key) {
+    const dayLines = linesOfDay(address, key);
+    const list = (items) => items.map((item) => `<b>${item.from}–${item.to}</b>`).join(',\n');
     const lines = [`<b>${title}</b>`];
-    if (intervals.off.length) lines.push(`🌑 ${formatDuration(totals.off)}: ${list(intervals.off)}`);
-    if (intervals.maybe.length) lines.push(`❔ ${formatDuration(totals.maybe)}: ${list(intervals.maybe)}`);
-    lines.push(`💡 ${formatDuration(totals.on)}`);
+    for (const { groups, row } of dayLines) {
+      const { totals, intervals } = summarizeDay(row);
+      if (address.groups.length > 1) lines.push(queueTitle(groups));
+      if (intervals.off.length) lines.push(`🌑 ${formatDuration(totals.off)}:\n${list(intervals.off)}`);
+      if (intervals.maybe.length) lines.push(`❔ ${formatDuration(totals.maybe)}:\n${list(intervals.maybe)}`);
+      lines.push(`💡 ${formatDuration(totals.on)}`);
+    }
     return lines.join('\n');
   }
 
@@ -100,16 +121,21 @@ export function createApp({
     return lines.join('\n');
   }
 
-  function renderSchedule(address, info, heading, days = [dayKey(now()), dayKey(now(), 1)]) {
+  function renderSchedule(address, info, heading, days, showAddress) {
     const parts = [
       heading,
-      `📍 ${escapeHtml(addressLabel(address))} · черга ${groupLabel(address.group)}`,
+      showAddress ? `📍 ${escapeHtml(addressLabel(address))} · ${queueLabel(address.groups)}` : null,
       renderCurrentOutage(info),
-      ...days.map((key) => renderDay(dayTitle(key), store.fact?.data?.[key]?.[address.group])),
-      `Оновлено на сайті: ${escapeHtml(store.fact?.update || 'немає даних')}`,
+      ...(days.length ? days.map((key) => renderDay(dayTitle(key), address, key)) : ['Графіка поки немає.']),
       siteDownSince ? '⚠️ Сайт зараз не відповідає, це останній отриманий графік.' : null,
     ];
     return parts.filter(Boolean).join('\n\n');
+  }
+
+  function lineButtons(addressId, lines) {
+    const choices = lines.map((group, index) => [{ text: `Черга ${groupLabel(group)}`, callback_data: `line:${addressId}:${index}` }]);
+    choices.push([{ text: 'Не знаю, стежити за всіма', callback_data: `line:${addressId}:all` }]);
+    return { reply_markup: { inline_keyboard: choices } };
   }
 
   // Refreshes the address on the site: its queue can be reassigned. A failed lookup keeps the stored queue.
@@ -122,27 +148,41 @@ export function createApp({
       log(`Адрес не проверен: ${error.message}`);
       return null;
     }
-    const groups = info?.sub_type_reason ?? [];
-    if (groups.length === 1 && groups[0] !== address.group) {
-      await send(chatId, `Черга за адресою ${escapeHtml(addressLabel(address))} змінилася: ${groupLabel(address.group)} → ${groupLabel(groups[0])}.`);
-      address.group = groups[0];
-      store.save();
+    const onSite = info?.sub_type_reason ?? [];
+    if (!onSite.length || onSite.join() === address.lines.join()) return info ?? null;
+
+    // Someone who chose their line keeps it for as long as the site still lists it for the house.
+    const keepsChoice = !address.allLines && onSite.includes(address.groups[0]);
+    const label = escapeHtml(addressLabel(address));
+    const buttons = onSite.length > 1 ? lineButtons(address.id, onSite) : MENU;
+    if (!keepsChoice) {
+      const was = address.groups.map(groupLabel).join(', ');
+      const hint = onSite.length > 1 ? ' Будинок підключений до різних ліній. Якщо знаєте свою, оберіть її:' : '';
+      await send(chatId, `Черга за адресою ${label} змінилася: ${was} → ${onSite.map(groupLabel).join(', ')}.${hint}`, buttons);
+      address.groups = onSite;
+      address.allLines = onSite.length > 1;
+    } else if (onSite.length > 1) {
+      await send(chatId, `За адресою ${label} тепер ${queueLabel(onSite)}. Ви стежите за чергою ${groupLabel(address.groups[0])}, за потреби оберіть іншу:`, buttons);
     }
+    address.lines = onSite;
+    store.save();
     return info ?? null;
   }
 
   // A drawing problem must not cost anyone their schedule, so the plain text is the fallback.
-  function drawSchedule(address, days) {
+  function drawSchedule(address, days, showAddress) {
     const today = dayKey(now());
     const [hours, minutes] = formatClock(now()).split(':').map(Number);
     try {
       return renderImage({
-        address: addressLabel(address),
-        group: groupLabel(address.group),
-        update: store.fact?.update,
+        address: showAddress ? addressLabel(address) : undefined,
+        queues: queueLabel(address.groups),
         days: days.map((key) => ({
           title: dayTitle(key),
-          row: store.fact?.data?.[key]?.[address.group],
+          lines: linesOfDay(address, key).map(({ groups, row }) => ({
+            label: address.groups.length > 1 ? queueTitle(groups) : undefined,
+            row,
+          })),
           nowMinutes: key === today ? hours * 60 + minutes : undefined,
         })),
       });
@@ -152,9 +192,17 @@ export function createApp({
     }
   }
 
-  async function deliverSchedule(chatId, address, info, heading, days = [dayKey(now()), dayKey(now(), 1)]) {
-    const text = renderSchedule(address, info, heading, days);
-    const image = drawSchedule(address, days);
+  // Days with nothing published are left out. If that empties a change notice (one day was
+  // withdrawn), the days still published are shown. With no days at all there is nothing to draw.
+  async function deliverSchedule(chatId, address, info, heading, requestedDays) {
+    const published = (keys) => keys.filter((key) => linesOfDay(address, key).length);
+    const defaultDays = [dayKey(now()), dayKey(now(), 1)];
+    const requested = published(requestedDays ?? defaultDays);
+    const days = requested.length ? requested : published(defaultDays);
+    // With one address everyone knows which one it is, so the message stays down to the schedule.
+    const showAddress = store.getUser(chatId).addresses.length > 1;
+    const text = renderSchedule(address, info, heading, days, showAddress);
+    const image = days.length ? drawSchedule(address, days, showAddress) : null;
     if (!image) {
       await send(chatId, text);
     } else if (text.length <= MAX_CAPTION_LENGTH) {
@@ -180,11 +228,11 @@ export function createApp({
     return streets;
   }
 
-  async function offerOptions(chatId, dialog, step, options, question) {
+  async function offerOptions(chatId, dialog, step, options, question, labelOf = (option) => option) {
     dialog.step = step;
     dialog.options = options.slice(0, MAX_OPTIONS);
     const keyboard = dialog.options.map((option, index) => [{
-      text: option, callback_data: `${step}:${index}`,
+      text: labelOf(option), callback_data: `${step}:${index}`,
     }]);
     const more = options.length > MAX_OPTIONS
       ? `\nЗнайдено варіантів: ${options.length}, показую перші ${MAX_OPTIONS}. Якщо потрібного немає, напишіть точніше.`
@@ -208,18 +256,26 @@ export function createApp({
     await send(chatId, 'Напишіть населений пункт, як на сайті ДТЕК, наприклад: <b>Білогородка</b>');
   }
 
-  async function saveAddress(chatId, dialog, group) {
+  async function saveAddress(chatId, dialog, groups) {
     const user = store.getUser(chatId);
     dialogs.delete(chatId);
     const { city, street, house } = dialog;
     const duplicate = user.addresses.some((address) => address.city === city && address.street === street
-      && address.house === house && address.group === group);
+      && address.house === house && address.groups.join() === groups.join());
     if (duplicate) {
       await send(chatId, `Ця адреса вже відстежується: ${escapeHtml(addressLabel({ city, street, house }))}.`);
       return;
     }
     const address = {
-      id: user.nextAddressId++, city, street, house, group, seen: snapshot(store.fact, group), warned: {},
+      id: user.nextAddressId++,
+      city,
+      street,
+      house,
+      groups,
+      allLines: groups.length > 1,
+      lines: dialog.houses[house].sub_type_reason,
+      seen: snapshotsOf(groups),
+      warned: {},
     };
     user.addresses.push(address);
     store.save();
@@ -240,15 +296,16 @@ export function createApp({
       return;
     }
     if (groups.length === 1) {
-      await saveAddress(chatId, dialog, groups[0]);
+      await saveAddress(chatId, dialog, groups);
       return;
     }
     await offerOptions(
       chatId,
       dialog,
       'group',
-      groups,
-      'Цей будинок підключений до різних ліній, і квартири можуть вимикатися за різними чергами. Оберіть свою:',
+      [...groups, ALL_LINES],
+      'Цей будинок підключений до різних ліній, і ДТЕК не вказує, від якої ваша квартира. Оберіть свою чергу або стежте за всіма:',
+      (option) => (option === ALL_LINES ? 'Не знаю, стежити за всіма' : `Черга ${groupLabel(option)}`),
     );
   }
 
@@ -286,7 +343,7 @@ export function createApp({
     if (step === 'city') await chooseCity(chatId, dialog, value);
     else if (step === 'street') await chooseStreet(chatId, dialog, value);
     else if (step === 'house') await chooseHouse(chatId, dialog, value);
-    else await saveAddress(chatId, dialog, value);
+    else await saveAddress(chatId, dialog, value === ALL_LINES ? dialog.houses[dialog.house].sub_type_reason : [value]);
   }
 
   async function answerDialog(chatId, dialog, text) {
@@ -324,11 +381,14 @@ export function createApp({
       return;
     }
     const lines = user.addresses.map((address, index) => (
-      `${index + 1}. ${escapeHtml(addressLabel(address))}, черга ${groupLabel(address.group)}`
+      `${index + 1}. ${escapeHtml(addressLabel(address))}, ${queueLabel(address.groups)}`
     ));
-    const keyboard = user.addresses.map((address, index) => [
-      { text: `📅 Графік ${index + 1}`, callback_data: `show:${address.id}` },
-      { text: `🗑 Видалити ${index + 1}`, callback_data: `del:${address.id}` },
+    const keyboard = user.addresses.flatMap((address, index) => [
+      [
+        { text: `📅 Графік ${index + 1}`, callback_data: `show:${address.id}` },
+        { text: `🗑 Видалити ${index + 1}`, callback_data: `del:${address.id}` },
+      ],
+      ...(address.lines.length > 1 ? [[{ text: `🔀 Змінити чергу ${index + 1}`, callback_data: `choose:${address.id}` }]] : []),
     ]);
     const text = `${prefix}<b>Адреси, що відстежуються</b>\n${lines.join('\n')}\n\nЗа кожною приходять зміни графіка та попередження за ${warnMinutes} хв до відключення.`;
     await send(chatId, text, { reply_markup: { inline_keyboard: keyboard } });
@@ -384,7 +444,20 @@ export function createApp({
     await send(chatId, `Оберіть дію кнопкою внизу: «${BUTTON_SCHEDULE}», «${BUTTON_ADD}» або «${BUTTON_LIST}».`);
   }
 
-  async function handleAddressButton(chatId, action, id) {
+  async function chooseLine(chatId, address, choice) {
+    const groups = choice === 'all' ? address.lines : [address.lines[Number(choice)]];
+    if (groups[0] === undefined) {
+      await send(chatId, `Цей список застарів. Щоб змінити чергу, відкрийте «${BUTTON_LIST}».`);
+      return;
+    }
+    address.groups = groups;
+    address.allLines = groups.length > 1;
+    address.seen = snapshotsOf(groups);
+    store.save();
+    await sendSchedule(chatId, address, `✅ <b>Збережено: ${queueLabel(groups)}</b>`);
+  }
+
+  async function handleAddressButton(chatId, action, id, choice) {
     const user = store.getUser(chatId);
     const address = user.addresses.find((item) => item.id === Number(id));
     if (!address) {
@@ -393,6 +466,14 @@ export function createApp({
     }
     if (action === 'show') {
       await sendSchedule(chatId, address);
+      return;
+    }
+    if (action === 'choose') {
+      await send(chatId, `Оберіть чергу для адреси ${escapeHtml(addressLabel(address))}:`, lineButtons(address.id, address.lines));
+      return;
+    }
+    if (action === 'line') {
+      await chooseLine(chatId, address, choice);
       return;
     }
     user.addresses = user.addresses.filter((item) => item !== address);
@@ -405,9 +486,9 @@ export function createApp({
     await telegram.answerCallbackQuery(query.id).catch((error) => log(error.message));
     const chatId = query.message?.chat?.id;
     if (!chatId || !store.getUser(chatId)) return;
-    const [action, value] = String(query.data).split(':');
-    if (action === 'show' || action === 'del') {
-      await handleAddressButton(chatId, action, value);
+    const [action, value, choice] = String(query.data).split(':');
+    if (['show', 'del', 'choose', 'line'].includes(action)) {
+      await handleAddressButton(chatId, action, value, choice);
       return;
     }
     const dialog = dialogs.get(chatId);
@@ -419,11 +500,23 @@ export function createApp({
     await pick(chatId, dialog, action, option);
   }
 
+  // A line the address did not follow before counts as a change, not as a newly published day.
+  function diffAddress(address) {
+    const result = { changed: false, added: false, days: new Set() };
+    for (const group of address.groups) {
+      const seen = address.seen[group];
+      const diff = diffSnapshots(seen ?? {}, snapshot(store.fact, group), now());
+      if (diff.changed || (!seen && diff.added)) result.changed = true;
+      else if (diff.added) result.added = true;
+      for (const day of diff.days) result.days.add(day);
+    }
+    return { ...result, days: [...result.days].sort((a, b) => Number(a) - Number(b)) };
+  }
+
   async function notifyChanges() {
     for (const [chatId, user] of store.users()) {
       for (const address of user.addresses) {
-        const current = snapshot(store.fact, address.group);
-        const { changed, added, days } = diffSnapshots(address.seen, current, now());
+        const { changed, added, days } = diffAddress(address);
         if (changed || added) {
           const heading = changed ? '🔄 <b>Графік змінився</b>' : '🆕 <b>Опубліковано новий графік</b>';
           try {
@@ -434,10 +527,18 @@ export function createApp({
           }
         }
         // Re-read: sendSchedule may have just moved the address to another queue.
-        address.seen = snapshot(store.fact, address.group);
+        address.seen = snapshotsOf(address.groups);
       }
     }
     store.save();
+  }
+
+  async function syncAllAddresses() {
+    for (const [chatId, user] of store.users()) {
+      for (const address of user.addresses) {
+        await syncAddress(chatId, address).catch((error) => log(`Не отправлено ${chatId}: ${error.message}`));
+      }
+    }
   }
 
   async function markSiteDown(error) {
@@ -455,27 +556,43 @@ export function createApp({
     siteAlertSent = false;
   }
 
+  // Lines whose outage is the very same one share a single warning.
+  function dueWarnings(address) {
+    const due = new Map();
+    for (const group of address.groups) {
+      for (const start of outageStarts(store.fact, group)) {
+        const left = start.at - now();
+        const key = `${group}:${start.at}`;
+        if (left <= 0 || left > warnMinutes * 60000 || address.warned[key]) continue;
+        const same = `${start.at}:${start.until}:${start.certain}:${start.openEnded}`;
+        if (!due.has(same)) due.set(same, { start, left, groups: [], keys: [] });
+        due.get(same).groups.push(group);
+        due.get(same).keys.push(key);
+      }
+    }
+    return [...due.values()];
+  }
+
   async function warnAddress(chatId, address) {
     let dirty = false;
-    for (const start of outageStarts(store.fact, address.group)) {
-      const left = start.at - now();
-      if (left <= 0 || left > warnMinutes * 60000 || address.warned[start.at]) continue;
+    for (const { start, left, groups, keys } of dueWarnings(address)) {
       const what = start.certain ? 'відключення світла' : 'можливе відключення світла';
       const until = start.openEnded
         ? `щонайменше до ${formatClock(start.until)}`
         : `до ${formatClock(start.until)}`;
-      const text = `⚠️ ${escapeHtml(addressLabel(address))}\nЧерез ${Math.ceil(left / 60000)} хв ${what}: з ${formatClock(start.at)} ${until}.`;
+      const lines = address.groups.length > 1 ? `, ${queueLabel(groups)}` : '';
+      const text = `⚠️ ${escapeHtml(addressLabel(address))}${lines}\nЧерез ${Math.ceil(left / 60000)} хв ${what}: з ${formatClock(start.at)} ${until}.`;
       try {
         await send(chatId, text);
-        address.warned[start.at] = true;
+        for (const key of keys) address.warned[key] = true;
         dirty = true;
       } catch (error) {
         log(`Не отправлено ${chatId}: ${error.message}`);
       }
     }
-    for (const at of Object.keys(address.warned)) {
-      if (Number(at) < now() - DAY_MS) {
-        delete address.warned[at];
+    for (const key of Object.keys(address.warned)) {
+      if (Number(key.split(':').pop()) < now() - DAY_MS) {
+        delete address.warned[key];
         dirty = true;
       }
     }
@@ -491,6 +608,7 @@ export function createApp({
     // One cheap check per run. Every 30 minutes the whole page is reloaded as well, so a silent
     // change in how the update check behaves cannot leave the bot on an old schedule forever.
     pollSite: async () => {
+      const previousUpdate = store.fact?.update;
       try {
         if (!store.fact || !streets || now() - lastFullLoad >= FULL_RELOAD_MS) {
           const page = await site.loadPage();
@@ -507,6 +625,8 @@ export function createApp({
       }
       store.save();
       await markSiteUp();
+      // The site reassigns queues along with its updates, so check the addresses before the schedule.
+      if (previousUpdate !== undefined && store.fact.update !== previousUpdate) await syncAllAddresses();
       await notifyChanges();
     },
 
@@ -521,11 +641,7 @@ export function createApp({
     },
 
     refreshAddresses: async () => {
-      for (const [chatId, user] of store.users()) {
-        for (const address of user.addresses) {
-          await syncAddress(chatId, address).catch((error) => log(`Не отправлено ${chatId}: ${error.message}`));
-        }
-      }
+      await syncAllAddresses();
       await notifyChanges();
     },
   };
