@@ -53,3 +53,31 @@ test('Neon store retries a failed write', async () => {
   await store.flush();
   assert.equal(writes, 2);
 });
+
+test('separate stores never share their users', async () => {
+  const { createStore } = await import('../src/store.js');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'svet-store-'));
+  try {
+    const first = createStore(join(dir, 'a.json'));
+    const second = createStore(join(dir, 'b.json'));
+    first.addUser(1);
+    assert.equal(second.getUser(1), undefined);
+    const neon = await createNeonStore({ connectionString: 'postgres://example', sqlFactory: fakeSql().factory });
+    assert.equal(neon.getUser(1), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the time the schedule source was read is kept with the state', async () => {
+  const db = fakeSql([{ data: { fact: null, users: {}, sourceUpdatedAt: 5 } }]);
+  const store = await createNeonStore({ connectionString: 'postgres://example', sqlFactory: db.factory });
+  assert.equal(store.sourceUpdatedAt, 5);
+  store.sourceUpdatedAt = 9;
+  store.save();
+  await store.flush();
+  assert.match(JSON.stringify(db.calls.at(-1).values), /sourceUpdatedAt\\":9/);
+});

@@ -366,7 +366,7 @@ function appFor(ctx, power) {
   const say = (app, text, chatId = 1) => app.handleUpdate({ message: { chat: { id: chatId, type: 'private' }, text } });
   return {
     app: createApp({
-      telegram: ctx.telegramForApp, site: {}, store: ctx.store, accessCode: 'secret', power, now: () => ctx.clock.now, log: () => {},
+      telegram: ctx.telegramForApp, source: {}, store: ctx.store, accessCode: 'secret', power, now: () => ctx.clock.now, log: () => {},
     }),
     say,
   };

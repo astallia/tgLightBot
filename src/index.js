@@ -2,19 +2,18 @@ import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createApp } from './app.js';
-import { createDtekClient } from './dtek.js';
 import { createPowerMonitor } from './power.js';
+import { createScheduleSource } from './source.js';
 import { createNeonStore, createStore } from './store.js';
 import { createTelegram } from './telegram.js';
 import { createXiaomiClient, loadSession } from './xiaomi.js';
 
 const WARNING_CHECK_MS = 20000;
-const ADDRESS_REFRESH_MS = 60 * 60000;
 const MAX_BODY_BYTES = 1024 * 1024;
 
 const {
   BOT_TOKEN, ACCESS_CODE, POLL_SECONDS = '120', WARN_MINUTES = '15', DATA_FILE = 'data/state.json', PORT = '10000',
-  TELEGRAM_API_URL, DTEK_BASE_URL, DATABASE_URL, PUBLIC_URL, RENDER_EXTERNAL_HOSTNAME, WEBHOOK_SECRET, CRON_SECRET,
+  TELEGRAM_API_URL, SCHEDULE_URL, DATABASE_URL, PUBLIC_URL, RENDER_EXTERNAL_HOSTNAME, WEBHOOK_SECRET, CRON_SECRET,
   POWER_SENSOR_MODEL, POWER_REFERENCE_MODELS = '', POWER_POLL_SECONDS = '30', POWER_OFF_MINUTES = '0', POWER_ON_MINUTES = '0',
 } = process.env;
 
@@ -50,14 +49,13 @@ const power = xiaomiSession && createPowerMonitor({
 });
 const app = createApp({
   telegram,
-  site: createDtekClient({ baseUrl: DTEK_BASE_URL }),
+  source: createScheduleSource({ url: SCHEDULE_URL }),
   store,
   accessCode: ACCESS_CODE,
   power,
   warnMinutes: Number(WARN_MINUTES),
 });
 
-let lastAddressRefresh = 0;
 let tickPromise = null;
 let operation = Promise.resolve();
 let ready = false;
@@ -74,10 +72,6 @@ async function runTick() {
     await app.pollSite();
     await app.checkWarnings();
     if (power) await power.poll();
-    if (Date.now() - lastAddressRefresh >= ADDRESS_REFRESH_MS) {
-      await app.refreshAddresses();
-      lastAddressRefresh = Date.now();
-    }
     await store.flush();
   }).finally(() => {
     tickPromise = null;
@@ -171,9 +165,9 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
   try {
     const me = await telegram.getMe();
     await telegram.setMyCommands([
-      { command: 'schedule', description: 'Показати графіки за всіма адресами' },
-      { command: 'add', description: 'Додати адресу' },
-      { command: 'addresses', description: 'Мої адреси: графік і видалення' },
+      { command: 'schedule', description: 'Показати графіки' },
+      { command: 'add', description: 'Додати чергу' },
+      { command: 'addresses', description: 'Мої черги: графік і видалення' },
     ]);
     if (hosted) await telegram.setWebhook(`${publicUrl}/telegram`, webhookSecret);
     else await telegram.deleteWebhook();
@@ -183,10 +177,9 @@ server.listen(Number(PORT), '0.0.0.0', async () => {
       void runTick().catch((error) => console.error(`Первая проверка: ${error.message}`));
     } else {
       await serialize(app.pollSite);
-      repeat('Проверка сайта', Number(POLL_SECONDS) * 1000, app.pollSite);
+      repeat('Проверка графиков', Number(POLL_SECONDS) * 1000, app.pollSite);
       repeat('Предупреждения', WARNING_CHECK_MS, app.checkWarnings);
       if (power) repeat('Датчик света', Number(POWER_POLL_SECONDS) * 1000, power.poll);
-      repeat('Проверка адресов', ADDRESS_REFRESH_MS, app.refreshAddresses);
       void receiveUpdates();
     }
   } catch (error) {

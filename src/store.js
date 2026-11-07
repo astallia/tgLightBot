@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-const EMPTY_STATE = { fact: null, users: {} };
+// A fresh object every time: a shared one would let separate stores share their users.
+const emptyState = () => ({ fact: null, users: {} });
 
 function storeApi(state, save, flush = async () => {}) {
   return {
@@ -13,6 +14,13 @@ function storeApi(state, save, flush = async () => {}) {
     },
     get power() {
       return state.power;
+    },
+    // When the schedule source last read its data, to recognise an older copy coming back.
+    get sourceUpdatedAt() {
+      return state.sourceUpdatedAt;
+    },
+    set sourceUpdatedAt(value) {
+      state.sourceUpdatedAt = value;
     },
     set power(value) {
       state.power = value;
@@ -31,7 +39,7 @@ function storeApi(state, save, flush = async () => {}) {
 // A JSON file is enough for local use. The write goes through a temp file so that
 // a crash in the middle cannot leave a broken state behind.
 export function createStore(path) {
-  let state = { ...EMPTY_STATE };
+  let state = emptyState();
   try {
     state = { ...state, ...JSON.parse(readFileSync(path, 'utf8')) };
   } catch (error) {
@@ -59,7 +67,7 @@ export async function createNeonStore({ connectionString, id = 'main', sqlFactor
     )
   `;
   const rows = await sql`select data from bot_state where id = ${id}`;
-  const state = { ...EMPTY_STATE, ...(rows[0]?.data ?? {}) };
+  const state = { ...emptyState(), ...(rows[0]?.data ?? {}) };
   let persisted = JSON.stringify(state);
   let dirty = false;
 
